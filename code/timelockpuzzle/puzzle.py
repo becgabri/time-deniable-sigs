@@ -2,7 +2,7 @@ import os
 import sys
 import timeit
 
-from algorithms.fast_exponentiation import fast_exponentiation
+from timelockpuzzle.algorithms.fast_exponentiation import fast_exponentiation
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.backends import default_backend

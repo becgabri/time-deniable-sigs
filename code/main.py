@@ -1,11 +1,14 @@
  
 from HIBE.hibenc_lew11 import HIBE_LW11 
-import timelockpuzzle
+import timelockpuzzle.puzzle as puzzle 
 import math
+import json
+from json import JSONEncoder, JSONDecoder
 from charm.toolbox.pairinggroup import GT, PairingGroup 
 
 # this is the size of time stamps supported
-TIME_SIZE_L = 5
+TIME_SIZE_L = 4
+MACHINE_SPEED = 10 # this should be the number of squarings a machine can do per second
 
 # It's expected that id here is a binary string 
 def encodeIdentity(id):
@@ -16,10 +19,6 @@ def encodeIdentity(id):
         list_id.append(curr_id)
     return list_id
 
-# this is just a placeholder for now
-def randomizeKey(sk): 
-     return sk
-
 def findPrefix(list_sk_t, t_prime):
     t_prime_bin = bin(t_prime)[2:].zfill(TIME_SIZE_L)
 
@@ -29,14 +28,40 @@ def findPrefix(list_sk_t, t_prime):
     
     while True:
         curr_idx = int(math.floor((end + beg) / 2))
-        prefix_cut = t_prime_bin[:len(list_sk_t[curr_idx])+1]
-        if t_prime_bin.startswith(list_sk_t[curr_idx][0]):
+        prefix_cut = t_prime_bin[:len(list_sk_t[curr_idx][0])]
+        if prefix_cut == list_sk_t[curr_idx][0]:
             # end condition
+            # print("Returning index: {}\nPrefix: {}\nActual ID: {}\n".format(curr_idx, list_sk_t[curr_idx][0], t_prime_bin))
             return curr_idx
         elif int(prefix_cut,2) > int(list_sk_t[curr_idx][0], 2):
             beg = curr_idx
         else:
             end = curr_idx
+
+class KeyEncoder(JSONEncoder):
+    def default(self, o):
+        group = PairingGroup('SS512')
+ 
+        if isinstance(o, bytes):
+            return o.decode()
+        if group.ismember(o):
+            return group.serialize(o)
+        ValueError("Unexpected element in key encoder, please debug :(")
+
+class KeyDecoder(JSONDecoder):
+    def __init__(self,*args, **kwargs):
+        json.JSONDecoder.__init__(self, object_hook=self.object_hook, *args, **kwargs) 
+
+    def object_hook(self, obj):
+        group = PairingGroup('SS512')
+        if isinstance(obj, dict):
+            for i,val in obj.items():
+                if isinstance(val, list):
+                    for i2, val2 in enumerate(val):
+                        for i3, val3 in enumerate(val2):
+                            pairing_elt = group.deserialize(val3.encode())
+                            obj[i][i2][i3] = pairing_elt
+        return obj
     
 class TimeDeniableSig:
 
@@ -48,45 +73,68 @@ class TimeDeniableSig:
         msk, pp = self.hibe.setup()
         return ((pp,timeGap), (pp,timeGap,msk))
 
-
+    # t_prime - a number in the appropriate range t_prime <= t 
     def FSDelegate(self, pk, t, sk_t, t_prime):
+        if t_prime > t: 
+            raise ValueError("Cannot delegate off functional key of lower value t")
         _, list_sk_t = sk_t 
         new_list = []
         #find prefix using binary search 
         idx_for_prefix = findPrefix(list_sk_t, t_prime)
-
+        prefix_len = len(list_sk_t[idx_for_prefix][0]) 
 
         # if there are keys before the prefix point, just randomize and keep those
         for i in range(idx_for_prefix):
-            new_list.append(randomizeKey(list_sk_t[i])) # TODO: check if the HIBE scheme impl can already properly deal with this
+            new_list.append((list_sk_t[i][0], self.hibe.delegate(pk, list_sk_t[i][1], encodeIdentity(list_sk_t[i][0]))))
 
         # take the prefix and delegate off of what needs to be delegated
         # this time, we go from the direction of "root" down to the leaf because in this context that makes more sense
         t_prime_as_bits = bin(t_prime)[2:].zfill(TIME_SIZE_L)
-        curr_id = list_sk_t[idx_for_prefix]
+        curr_id = list_sk_t[idx_for_prefix][0]
         curr_id = curr_id[:len(curr_id)-1]
+
         for i in range(idx_for_prefix, TIME_SIZE_L-1):
             string_left_mask = (1 << (TIME_SIZE_L-i-1)) -1
             if t_prime_as_bits[i] == '0' and int(t_prime_as_bits[i+1:],2) == string_left_mask:
-                new_list.append(curr_id + '0')
+                # problem, probably have to call delegate multiple times here :( 
+                curr_key = list_sk_t[idx_for_prefix][1]
+                idAsEncoded = encodeIdentity(curr_id+'0')
+                for j in range(i-prefix_len):
+                    curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+j+1])
+                new_list.append((curr_id + '0', self.hibe.delegate(pk, curr_key, idAsEncoded)))
                 return new_list
             elif t_prime_as_bits[i] == '1' and i != (TIME_SIZE_L - 1):
-                new_list.append(curr_id+'0')
+                curr_key = list_sk_t[idx_for_prefix][1]
+                idAsEncoded = encodeIdentity(curr_id+'0')
+                for j in range(i-prefix_len):
+                    curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+j+1])
+                new_list.append((curr_id + '0', self.hibe.delegate(pk, curr_key, idAsEncoded)))
 
             curr_id += t_prime_as_bits[i]
 
         if t_prime_as_bits[TIME_SIZE_L-1] == '0' and t_prime < t: 
-            new_list.append(t_prime_as_bits) 
+            len_size = TIME_SIZE_L - len(list_sk_t[idx_for_prefix][0])
+            curr_key = list_sk_t[idx_for_prefix][1]
+            idAsEncoded = encodeIdentity(t_prime_as_bits)
+            for i in range(len_size):
+                curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+1+i])
+            new_list.append((t_prime_as_bits, curr_key)) 
 
         return new_list
 
     # going down from the root
+    # sk_prime - mpk and msk from HIBE
+    # t - a number within the appropriate range t < 2^TIME_SIZE_L
     def FSKeygen(self, sk_prime, t):
         pk, sk = sk_prime 
         list_keys = []
         t_as_bits = bin(t)[2:].zfill(TIME_SIZE_L) 
         curr_id = ''
 
+        # ignoring the edge case that messes everything up
+        if t == (1 << TIME_SIZE_L) -1:
+            raise ValueError("Do not support extracting key of maximum value {}".format((1 << TIME_SIZE_L)-1))
+        
         for i in range(TIME_SIZE_L-1):
             string_left_mask = (1 << (TIME_SIZE_L - i -1)) - 1
             if t_as_bits[i] == '0' and int(t_as_bits[i+1:],2) == string_left_mask:
@@ -105,6 +153,18 @@ class TimeDeniableSig:
 
         return list_keys
 
+    def FSSign(self, sk, t, m):
+        pk_prime, list_keys = sk
+        idx = findPrefix(list_keys, t)
+        lenPrefix = len(list_keys[idx][0])
+
+        t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
+        encedID = encodeIdentity(t_bin+m)
+        curr_key = list_keys[idx][1]
+        for j in range(len(encedID)-lenPrefix):
+            curr_key = self.hibe.delegate(pk_prime, curr_key, encedID[:lenPrefix+j+1])  
+        return curr_key
+
     # assumption right now is message is a binary string 
     def Sign(self, sk, m, t):
         # produce the signature on the message using the FS
@@ -112,48 +172,44 @@ class TimeDeniableSig:
         t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
 
         list_keys = self.FSKeygen((pk_prime, sk_prime), t)
-        idx = findPrefix(list_keys, t)
-        # extract key and run hibe delegate to get the signature
-        #TODO: change to a hash 
-        lenPrefix = len(list_keys[idx][0])
+        s = self.FSSign((pk_prime, list_keys), t, m)
         
-        # so yeah... this is going to suck
-        # need to delegate for everything leftover here :(         
-        encedID = encodeIdentity(t_bin+m)
-        curr_key = list_keys[idx][1]
-        for j in range(len(encedID)-lenPrefix):
-            curr_key = self.hibe.delegate(pk_prime, curr_key, encedID[:lenPrefix+j+1])  
-        
-        """
-        leftover_t = ""
-        if lenPrefix != len(t_bin):
-            leftover_t = t_bin[lenPrefix+1:]
-       
-        id_to_extract = [t_bin[:lenPrefix+1], leftover_t+m]
-        
-
-        # this is a temporary check, pull this out in a sec
-        if not (id_to_extract[0]+id_to_extract[1]).startswith(list_keys[idx][0]):
-            print("Still failed :(")
-            import pdb; pdb.set_trace()
-        sigma = self.hibe.delegate(pk_prime, list_keys[idx][1], id_to_extract) 
-        """
-        # time lock encrypt the functional key 
-        return curr_key
+        #TODO: time lock encrypt the functional key 
+        import pdb; pdb.set_trace()
+        pt_str = json.dumps(list_keys,cls=KeyEncoder)
+        pt = pt_str.encode()
+        _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
+        return ((n,a,bar_t,enc_key, enc_msg), s)
 
     def AltSign(self, vk, m_0, t_0, sigma_0, m, t):
-        return
+        if t > t_0: 
+            raise ValueError("Cannot sign a message on a later timestamp with a key for an earlier one!")
+        pk, timeGap = vk
+
+        c, _ = sigma_0 
+        n, a, bar_t, enc_key, enc_msg = c 
+        keys_as_bytes = puzzle.decrypt(n, a, bar_t, enc_key, enc_msg)
+        list_keys = json.loads(keys_as_bytes.decode(), cls=KeyDecoder)
+        import pdb; pdb.set_trace() 
+        # need to shrink w/ FS DELEG
+        new_list_keys = self.FSDelegate(pk, t_0, (pk, list_keys), t)
+        s = self.FSSign((pk, new_list_keys), t, m)
+        
+        pt = json.dumps(new_list_keys, cls=KeyEncoder).encode()
+        _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
+        return ((n,a,bar_t,enc_key,enc_msg), s)
 
     #it's assumed m is a bit string, t is a numerical value
     def Verify(self, vk, sigma, m, t):
         pk,_ = vk
+        _, sk_id = sigma
         t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
 
         test_elt = self.group.random(GT)
         # encrypt/decrypt check -- problem(!) think this has to be a Group elt. in target group G_T
         ct = self.hibe.encrypt(test_elt, encodeIdentity(t_bin+m), pk)
 
-        if self.hibe.decrypt(ct, sigma) == test_elt:
+        if self.hibe.decrypt(ct, sk_id) == test_elt:
             return True
         return False
 
@@ -166,22 +222,28 @@ def deepEqual(list1, list2):
     return True
 
 if __name__ == "__main__":
-    
     ts = TimeDeniableSig()
     
-    fakeTimeParam = 0
+    fakeTimeParam = 20
     # I don't know what the security of the pairing scheme actually corresponds to :( 
     # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know if this corresponds to AES key strength 256
     vk, sk = ts.KeyGen(fakeTimeParam, 256)
-    #m = bin(7482954207589427489323078107389174891)[2:].zfill(256)
-    m = bin(5)[2:].zfill(4) 
-    if len(m) > 256:
-        print("I messed up")
-        import pdb; pdb.set_trace()
 
-    sig = ts.Sign(sk, m, 12)
+    pk, timeGap, msk = sk 
+    keys = ts.FSKeygen((pk,msk), 4)
 
-    if not ts.Verify(vk, sig, m, 12):
+    m = bin(12)[2:].zfill(4) 
+    
+    sig = ts.Sign(sk, m, 14)
+
+    if not ts.Verify(vk, sig, m, 14):
+        print("Verification failed")
+
+    m2 = bin(15).zfill(4)
+    t2 = 6
+    sig2 = ts.AltSign(vk, m, 14, sig, m2, t2)
+
+    if not ts.Verify(vk, sig2, m2, t2):
         print("Verification failed")
 
     """ 
