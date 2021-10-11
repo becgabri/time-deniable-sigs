@@ -175,7 +175,6 @@ class TimeDeniableSig:
         s = self.FSSign((pk_prime, list_keys), t, m)
         
         #TODO: time lock encrypt the functional key 
-        import pdb; pdb.set_trace()
         pt_str = json.dumps(list_keys,cls=KeyEncoder)
         pt = pt_str.encode()
         _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
@@ -190,7 +189,6 @@ class TimeDeniableSig:
         n, a, bar_t, enc_key, enc_msg = c 
         keys_as_bytes = puzzle.decrypt(n, a, bar_t, enc_key, enc_msg)
         list_keys = json.loads(keys_as_bytes.decode(), cls=KeyDecoder)
-        import pdb; pdb.set_trace() 
         # need to shrink w/ FS DELEG
         new_list_keys = self.FSDelegate(pk, t_0, (pk, list_keys), t)
         s = self.FSSign((pk, new_list_keys), t, m)
@@ -226,25 +224,38 @@ if __name__ == "__main__":
     
     fakeTimeParam = 20
     # I don't know what the security of the pairing scheme actually corresponds to :( 
-    # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know if this corresponds to AES key strength 256
+    # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know but it could be that this corresponds to 80 bits of security (1024 bit DH)
     vk, sk = ts.KeyGen(fakeTimeParam, 256)
 
     pk, timeGap, msk = sk 
     keys = ts.FSKeygen((pk,msk), 4)
 
-    m = bin(12)[2:].zfill(4) 
-    
-    sig = ts.Sign(sk, m, 14)
+    m1 = bin(12)[2:].zfill(4) 
+    t1 = 13
+    sig1 = ts.Sign(sk, m1, t1)
 
-    if not ts.Verify(vk, sig, m, 14):
+    if not ts.Verify(vk, sig1, m1, t1):
         print("Verification failed")
+    else:
+        print("Passed Sign test")
 
     m2 = bin(15).zfill(4)
-    t2 = 6
-    sig2 = ts.AltSign(vk, m, 14, sig, m2, t2)
+    t2 = 10
+    sig2 = ts.AltSign(vk, m1, t1, sig1, m2, t2)
 
     if not ts.Verify(vk, sig2, m2, t2):
         print("Verification failed")
+    else:
+        print("Passed first AltSign test")
+
+    m3 = bin(7)[2:].zfill(4)
+    t3 = 2
+    sig3 = ts.AltSign(vk, m2, t2, sig2, m3, t3)
+
+    if not ts.Verify(vk, sig3, m3, t3):
+        print("Verification failed")
+    else: 
+        print("Passed second AltSign test")
 
     """ 
     dummy_sk = (0,0)
