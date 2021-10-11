@@ -120,6 +120,8 @@ class HIBE_LW11:
 		return SK	
 
 	def delegate (self, PP, SK, I):
+		existing_id_len = len(SK["K"])
+                                
 		y,w,w1, w2 = [],[],[],[]
 		for i in range(len(I) -1):
 			w1.append(group.random(ZR))
@@ -131,8 +133,10 @@ class HIBE_LW11:
 		y.append (0 - sum(y))
 		w.append (0 - sum(w))
 		K = [0 for x in range(len(I))]
+
+		# re-randomize existing keys 
 		g = [0 for x in range(6)]
-		for i in range(len(I)-1):            
+		for i in range(existing_id_len):
 			g[0] = [SK['g'][0][x]**y[i] for x in range(10)]
 			g[1] = [SK['g'][1][x]**w[i] for x in range(10)]
 			g[2] = [SK['g'][2][x]**(w1[i]* group.hash(I[i], ZR)) for x in range(10)]
@@ -140,20 +144,16 @@ class HIBE_LW11:
 			g[4] = [SK['g'][4][x]**(w2[i]* group.hash(I[i], ZR)) for x in range(10)]
 			g[5] = [SK['g'][5][x]**(-w2[i]) for x in range(10)]
 			K[i] = [SK['K'][i][x]*g[0][x]*g[1][x]*g[2][x]*g[3][x]*g[4][x]*g[5][x]  for x in range(10)] 
+		# create new id keys
+		for j in range(existing_id_len, len(I)):
+			g[0] = [SK['g'][0][x]**y[j] for x in range(10)]
+			g[1] = [SK['g'][1][x]**w[j] for x in range(10)]
+			g[2] = [SK['g'][2][x]**(w1[j]* group.hash(I[j], ZR)) for x in range(10)]
+			g[3] = [SK['g'][3][x]**(-w1[j]) for x in range(10)]
+			g[4] = [SK['g'][4][x]**(w2[j]* group.hash(I[j], ZR)) for x in range(10)]
+			g[5] = [SK['g'][5][x]**(-w2[j]) for x in range(10)]
+			K[j] = [g[0][x]*g[1][x]*g[2][x]*g[3][x]*g[4][x]*g[5][x]  for x in range(10)]
 
-		i = len(I)-1
-		g[0] = [SK['g'][0][x]**y[i] for x in range(10)]
-		g[1] = [SK['g'][1][x]**w[i] for x in range(10)]
-		g[2] = [SK['g'][2][x]**(w1[i]* group.hash(I[i], ZR)) for x in range(10)]
-		g[3] = [SK['g'][3][x]**(-w1[i]) for x in range(10)]
-		g[4] = [SK['g'][4][x]**(w2[i]* group.hash(I[i], ZR)) for x in range(10)]
-		g[5] = [SK['g'][5][x]**(-w2[i]) for x in range(10)]
-
-		# update to support proper key re-randomization 
-		if len(I) == len(SK['K']):
-			K[i] = [SK['K'][i][x]*g[0][x]*g[1][x]*g[2][x]*g[3][x]*g[4][x]*g[5][x]  for x in range(10)] 
-		else: 
-			K[i] = [g[0][x]*g[1][x]*g[2][x]*g[3][x]*g[4][x]*g[5][x]  for x in range(10)]
 		SK = {'g':SK['g'],'K':K}
 		if(debug):
 			print("Secret key:")

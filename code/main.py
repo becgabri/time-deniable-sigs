@@ -5,9 +5,10 @@ import math
 import json
 from json import JSONEncoder, JSONDecoder
 from charm.toolbox.pairinggroup import GT, PairingGroup 
+import sys 
 
 # this is the size of time stamps supported
-TIME_SIZE_L = 4
+TIME_SIZE_L = 32
 MACHINE_SPEED = 10 # this should be the number of squarings a machine can do per second
 
 # It's expected that id here is a binary string 
@@ -18,6 +19,33 @@ def encodeIdentity(id):
         curr_id += val
         list_id.append(curr_id)
     return list_id
+
+# attempts to represent n in the base b 
+# returns a list of elements z that satisfies
+# \sum i in len(z) b^i * z[i] = m
+def repr_base(m, b):
+    import pdb; pdb.set_trace()
+    if b < 1:
+        raise ValueError('Base you want to use must be a positive number')
+    if m < 0: 
+        raise ValueError('Number you want to represent must also be positive')
+
+    repr = []
+    accum = m
+    i = 1
+    while accum != 0:
+        curr_val = accum % (b**i)
+        val_at_idx = int(curr_val / b**(i-1)) 
+        repr.append(val_at_idx)
+        accum -= curr_val
+        i += 1
+    return repr
+
+def reconstruct_num(list_vals, base_b):
+    sum = 0
+    for idx, val in enumerate(list_vals):
+        sum += (val * base_b**idx)
+    return sum 
 
 def findPrefix(list_sk_t, t_prime):
     t_prime_bin = bin(t_prime)[2:].zfill(TIME_SIZE_L)
@@ -45,7 +73,7 @@ class KeyEncoder(JSONEncoder):
         if isinstance(o, bytes):
             return o.decode()
         if group.ismember(o):
-            return group.serialize(o)
+            return group.serialize(o, compression=False)
         ValueError("Unexpected element in key encoder, please debug :(")
 
 class KeyDecoder(JSONDecoder):
@@ -59,7 +87,7 @@ class KeyDecoder(JSONDecoder):
                 if isinstance(val, list):
                     for i2, val2 in enumerate(val):
                         for i3, val3 in enumerate(val2):
-                            pairing_elt = group.deserialize(val3.encode())
+                            pairing_elt = group.deserialize(val3.encode(), compression=False)
                             obj[i][i2][i3] = pairing_elt
         return obj
     
@@ -99,15 +127,19 @@ class TimeDeniableSig:
                 # problem, probably have to call delegate multiple times here :( 
                 curr_key = list_sk_t[idx_for_prefix][1]
                 idAsEncoded = encodeIdentity(curr_id+'0')
+                """
                 for j in range(i-prefix_len):
                     curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+j+1])
+                """
                 new_list.append((curr_id + '0', self.hibe.delegate(pk, curr_key, idAsEncoded)))
                 return new_list
             elif t_prime_as_bits[i] == '1' and i != (TIME_SIZE_L - 1):
                 curr_key = list_sk_t[idx_for_prefix][1]
                 idAsEncoded = encodeIdentity(curr_id+'0')
+                """
                 for j in range(i-prefix_len):
                     curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+j+1])
+                """
                 new_list.append((curr_id + '0', self.hibe.delegate(pk, curr_key, idAsEncoded)))
 
             curr_id += t_prime_as_bits[i]
@@ -116,9 +148,11 @@ class TimeDeniableSig:
             len_size = TIME_SIZE_L - len(list_sk_t[idx_for_prefix][0])
             curr_key = list_sk_t[idx_for_prefix][1]
             idAsEncoded = encodeIdentity(t_prime_as_bits)
+            """
             for i in range(len_size):
                 curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+1+i])
-            new_list.append((t_prime_as_bits, curr_key)) 
+            """
+            new_list.append((t_prime_as_bits, self.hibe.delegate(pk, curr_key, idAsEncoded))) 
 
         return new_list
 
@@ -161,9 +195,11 @@ class TimeDeniableSig:
         t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
         encedID = encodeIdentity(t_bin+m)
         curr_key = list_keys[idx][1]
+        """
         for j in range(len(encedID)-lenPrefix):
             curr_key = self.hibe.delegate(pk_prime, curr_key, encedID[:lenPrefix+j+1])  
-        return curr_key
+        """
+        return self.hibe.delegate(pk_prime, curr_key, encedID)
 
     # assumption right now is message is a binary string 
     def Sign(self, sk, m, t):
@@ -220,6 +256,17 @@ def deepEqual(list1, list2):
     return True
 
 if __name__ == "__main__":
+    """
+    simpleTest1 = repr_base(5, 2)
+    if reconstruct_num(simpleTest1,2) != 5:
+        print("Failed simplest test")
+    
+    simpleTest2 = repr_base(7,3)
+    if reconstruct_num(simpleTest2,3) != 7:
+        print("Failed simplest test")
+    
+    print("Staring Time Deniable Sig stuff")
+    """
     ts = TimeDeniableSig()
     
     fakeTimeParam = 20
@@ -227,12 +274,12 @@ if __name__ == "__main__":
     # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know but it could be that this corresponds to 80 bits of security (1024 bit DH)
     vk, sk = ts.KeyGen(fakeTimeParam, 256)
 
-    pk, timeGap, msk = sk 
-    keys = ts.FSKeygen((pk,msk), 4)
-
     m1 = bin(12)[2:].zfill(4) 
     t1 = 13
     sig1 = ts.Sign(sk, m1, t1)
+ 
+    sys.exit()
+    
 
     if not ts.Verify(vk, sig1, m1, t1):
         print("Verification failed")
@@ -256,6 +303,7 @@ if __name__ == "__main__":
         print("Verification failed")
     else: 
         print("Passed second AltSign test")
+    
 
     """ 
     dummy_sk = (0,0)
