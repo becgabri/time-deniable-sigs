@@ -5,7 +5,9 @@ import math
 import json
 from json import JSONEncoder, JSONDecoder
 from charm.toolbox.pairinggroup import GT, PairingGroup 
-import sys 
+import sys
+import threading 
+import copy
 
 # this is the size of time stamps supported
 TIME_SIZE_L = 32
@@ -24,7 +26,6 @@ def encodeIdentity(id):
 # returns a list of elements z that satisfies
 # \sum i in len(z) b^i * z[i] = m
 def repr_base(m, b):
-    import pdb; pdb.set_trace()
     if b < 1:
         raise ValueError('Base you want to use must be a positive number')
     if m < 0: 
@@ -74,7 +75,7 @@ class KeyEncoder(JSONEncoder):
             return o.decode()
         if group.ismember(o):
             return group.serialize(o, compression=False)
-        ValueError("Unexpected element in key encoder, please debug :(")
+        raise ValueError("Unexpected element in key encoder, please debug :(")
 
 class KeyDecoder(JSONDecoder):
     def __init__(self,*args, **kwargs):
@@ -91,6 +92,119 @@ class KeyDecoder(JSONDecoder):
                             obj[i][i2][i3] = pairing_elt
         return obj
     
+def serializerHelper(group, pairing_elt, shared_dict, needed_idx):
+    #group, pairing_elt, shared_dict, needed_idx = args
+    shared_dict[needed_idx] = group.serialize(pairing_elt, compression=False)
+
+def deserializerHelper(group, pairingBytes, shared_dict, needed_idx):
+    shared_dict[needed_idx] = group.deserialize(pairingBytes, compression=False)
+
+def pointCompressDecompress(compress_decompress, list_keys):
+    list_threads = []
+    group = PairingGroup('SS512')
+    for _, val in enumerate(list_keys):
+        actual_keys = val[1]
+        for key, vals in actual_keys.items():
+            if key == 'K':
+                for _, val2 in enumerate(vals):
+                    for i in range(len(val2)):
+                        t = threading.Thread(target=compress_decompress, args=(group, val2[i], val2, i,))
+                        list_threads.append(t)
+            elif key == 'g':
+                for _, val2 in enumerate(vals):
+                    for i in range(len(val2)):
+                        t = threading.Thread(target=compress_decompress, args=(group, val2[i], val2, i,))
+                        list_threads.append(t) 
+    for thread in list_threads:
+        thread.start()
+    for thread in list_threads:
+        thread.join()
+
+
+def serialize(list_keys):
+    pointCompressDecompress(serializerHelper, list_keys)   
+
+    byte_str = b""
+    for _, val in enumerate(list_keys):
+        byte_str += val[0].encode() + b"-"
+        for key, mtx in val[1].items():
+            if key == "K":
+                byte_str += b"["
+                for _, val2 in enumerate(mtx):                    
+                    byte_str += b"["+b"".join([val2[x] + b"," for x in range(len(val2))]) + b"]"
+                byte_str += b"]"
+            elif key == 'g': 
+                byte_str += b"[" 
+                for _, val2 in enumerate(mtx):
+                    byte_str += b"["+b"".join([val2[x] + b"," for x in range(len(val2))]) + b"]"  
+                byte_str += b"]"
+        #byte_str += b"]"   
+    return byte_str 
+
+# grabs next list of the form [elt1,elt2,elt3,elt4,]
+# expects the starting character [ to be present  
+# sets idx to be one character index beyond ] 
+def grabNextComponent(idx, search_string):
+    i = idx
+    if search_string[i] != ord("["):
+        raise ValueError("Outer component must start with [")
+    i = i + 1 # jump over start of outer array
+    component = []
+    while search_string[i] != ord("]"):
+        compr_pairing_elt = b""
+        while search_string[i] != ord(","):
+            compr_pairing_elt += bytes([search_string[i]])
+            i += 1
+        component.append(compr_pairing_elt)
+        i += 1 # jump over comma 
+    return i+1, component
+
+
+
+def deserialize(byte_string):
+    list_keys = []
+    # don't know the end condition yet
+    idx = 0
+    while idx < len(byte_string):
+        byte_id = bytearray()
+        while byte_string[idx] != ord("-"):
+            byte_id += bytes([byte_string[idx]])
+            idx+=1
+        dict_for_key = {}
+        idx += 1 # jump over -
+     
+        if byte_string[idx] != ord('['):
+            raise ValueError("Encoding is incorrect")
+        idx += 1 # jump over start of K indicated by [ 
+        dict_for_key['K'] = []
+        while True:
+            idx, component = grabNextComponent(idx, byte_string)
+
+            dict_for_key['K'].append(component)
+
+            if byte_string[idx] == ord(']'): ## this was a double break
+                break
+        
+        idx += 1 # -- jump over ']' that caused break 
+        if byte_string[idx] != ord('['):
+            raise ValueError("Incorrect decoding, g should be next")
+        idx += 1 # jump over beginning of g
+        dict_for_key['g'] = []
+        while True:
+            idx, component = grabNextComponent(idx, byte_string)
+            
+            dict_for_key['g'].append(component)
+             
+            if byte_string[idx] == ord(']'): ## this was a double break
+                break
+            
+        list_keys.append(( byte_id.decode(), dict_for_key))
+        idx = idx + 1 # jump over the final ], should be start of another key identifier next
+    pointCompressDecompress(deserializerHelper, list_keys)
+    return list_keys 
+        
+         
+
 class TimeDeniableSig:
 
     def KeyGen(self, timeGap, secParam):
@@ -110,49 +224,38 @@ class TimeDeniableSig:
         #find prefix using binary search 
         idx_for_prefix = findPrefix(list_sk_t, t_prime)
         prefix_len = len(list_sk_t[idx_for_prefix][0]) 
+        t_prime_as_bits = bin(t_prime)[2:].zfill(TIME_SIZE_L)
+        #print("T_prime:{}\nPrefix:{}\nKey Index:{}\n".format(t_prime_as_bits, list_sk_t[idx_for_prefix][0], idx_for_prefix))
 
         # if there are keys before the prefix point, just randomize and keep those
         for i in range(idx_for_prefix):
+            #print("Adding re-randomized key for identity: {}\n".format(list_sk_t[i][0]))
             new_list.append((list_sk_t[i][0], self.hibe.delegate(pk, list_sk_t[i][1], encodeIdentity(list_sk_t[i][0]))))
 
         # take the prefix and delegate off of what needs to be delegated
         # this time, we go from the direction of "root" down to the leaf because in this context that makes more sense
-        t_prime_as_bits = bin(t_prime)[2:].zfill(TIME_SIZE_L)
         curr_id = list_sk_t[idx_for_prefix][0]
         curr_id = curr_id[:len(curr_id)-1]
-
-        for i in range(idx_for_prefix, TIME_SIZE_L-1):
+        extract_key = list_sk_t[idx_for_prefix][1]
+        for i in range(prefix_len-1, TIME_SIZE_L-1):
             string_left_mask = (1 << (TIME_SIZE_L-i-1)) -1
             if t_prime_as_bits[i] == '0' and int(t_prime_as_bits[i+1:],2) == string_left_mask:
+                #print("Adding key for {}\n".format(curr_id+'0'))
                 # problem, probably have to call delegate multiple times here :( 
-                curr_key = list_sk_t[idx_for_prefix][1]
                 idAsEncoded = encodeIdentity(curr_id+'0')
-                """
-                for j in range(i-prefix_len):
-                    curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+j+1])
-                """
-                new_list.append((curr_id + '0', self.hibe.delegate(pk, curr_key, idAsEncoded)))
+                new_list.append((curr_id + '0', self.hibe.delegate(pk, extract_key, idAsEncoded)))
                 return new_list
             elif t_prime_as_bits[i] == '1' and i != (TIME_SIZE_L - 1):
-                curr_key = list_sk_t[idx_for_prefix][1]
+                #print("Adding key for {}\n".format(curr_id+'0'))
                 idAsEncoded = encodeIdentity(curr_id+'0')
-                """
-                for j in range(i-prefix_len):
-                    curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+j+1])
-                """
-                new_list.append((curr_id + '0', self.hibe.delegate(pk, curr_key, idAsEncoded)))
+                new_list.append((curr_id + '0', self.hibe.delegate(pk, extract_key, idAsEncoded)))
 
             curr_id += t_prime_as_bits[i]
 
         if t_prime_as_bits[TIME_SIZE_L-1] == '0' and t_prime < t: 
-            len_size = TIME_SIZE_L - len(list_sk_t[idx_for_prefix][0])
-            curr_key = list_sk_t[idx_for_prefix][1]
+            #print("Adding key for {}\n".format(t_prime_as_bits))
             idAsEncoded = encodeIdentity(t_prime_as_bits)
-            """
-            for i in range(len_size):
-                curr_key = self.hibe.delegate(pk, curr_key, idAsEncoded[:prefix_len+1+i])
-            """
-            new_list.append((t_prime_as_bits, self.hibe.delegate(pk, curr_key, idAsEncoded))) 
+            new_list.append((t_prime_as_bits, self.hibe.delegate(pk, extract_key, idAsEncoded))) 
 
         return new_list
 
@@ -209,10 +312,13 @@ class TimeDeniableSig:
 
         list_keys = self.FSKeygen((pk_prime, sk_prime), t)
         s = self.FSSign((pk_prime, list_keys), t, m)
-        
-        #TODO: time lock encrypt the functional key 
-        pt_str = json.dumps(list_keys,cls=KeyEncoder)
-        pt = pt_str.encode()
+
+        # note here, doing this clobbers the OG thing
+        # after this it's not the same  
+        pt = serialize(list_keys)
+        #pt_str = json.dumps(list_keys,cls=KeyEncoder)
+        #pt = pt_str.encode()
+
         _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
         return ((n,a,bar_t,enc_key, enc_msg), s)
 
@@ -224,12 +330,14 @@ class TimeDeniableSig:
         c, _ = sigma_0 
         n, a, bar_t, enc_key, enc_msg = c 
         keys_as_bytes = puzzle.decrypt(n, a, bar_t, enc_key, enc_msg)
-        list_keys = json.loads(keys_as_bytes.decode(), cls=KeyDecoder)
+        #list_keys = json.loads(keys_as_bytes.decode(), cls=KeyDecoder)
+        list_keys = deserialize(keys_as_bytes)
         # need to shrink w/ FS DELEG
         new_list_keys = self.FSDelegate(pk, t_0, (pk, list_keys), t)
         s = self.FSSign((pk, new_list_keys), t, m)
         
-        pt = json.dumps(new_list_keys, cls=KeyEncoder).encode()
+        #pt = json.dumps(new_list_keys, cls=KeyEncoder).encode()
+        pt = serialize(new_list_keys)
         _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
         return ((n,a,bar_t,enc_key,enc_msg), s)
 
@@ -246,6 +354,36 @@ class TimeDeniableSig:
         if self.hibe.decrypt(ct, sk_id) == test_elt:
             return True
         return False
+
+def keyEqual(dict1, dict2):
+    for key, outer_list in dict1.items():
+        if not key in dict2 or len(dict1[key]) != len(dict2[key]):
+            print("Is key {} in dict2? {}. Length in dict1: {}. Length in dict2: {}".format(key in dict2, len(dict1[key]), len(dict2[key])))
+            return False
+        # {'K': [[Key 1 has 10 components      ], ... [Key i has 10 components       ]
+        for idx, vals in enumerate(outer_list):
+            # one more nested list here 
+            if len(vals) != len(dict2[key][idx]):
+                print("Length of dict1[{}][{}] is {} while dict2 length is {}".format(key, idx, len(vals), len(dict2[key][idx])))
+                return False
+            # one more layer 
+            for id2, val2 in enumerate(vals):
+                if val2 != dict2[key][idx][id2]:
+                    print("dict1[{}][{}][{}] value is {} while dict2 value is {}".format(key, idx, id2,val2, dict2[key][idx][id2]))
+                    return False
+    return True
+
+def listKeysEqual(list1, list2):
+    if len(list1) != len(list2):
+        return False
+    for id, key_tuple in enumerate(list1):
+        key_id, key_val = key_tuple
+        if key_id != list2[id][0]:
+            print("Key ids are different {} != {}".format(key_id, list2[id][0]))
+            return False
+        if not keyEqual(key_val, list2[id][1]):
+            return False
+    return True
 
 def deepEqual(list1, list2): 
     if len(list1) != len(list2):
@@ -274,19 +412,30 @@ if __name__ == "__main__":
     # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know but it could be that this corresponds to 80 bits of security (1024 bit DH)
     vk, sk = ts.KeyGen(fakeTimeParam, 256)
 
+    # need to check right if deserialization/serialization is correct
+    pk, timeGap, sk_prime = sk
+    list_keys = ts.FSKeygen((pk, sk_prime), 13)
+    encoded = serialize(list_keys)
+    # remember, this function wrecks the current representation :P
+    pointCompressDecompress(deserializerHelper, list_keys)
+    decoded_keys = deserialize(encoded)
+    if not listKeysEqual(list_keys, decoded_keys):
+        print("Problem with encoder/decoder")
+        sys.exit()
+    else:
+        print("Key encoding seems okay, checking other stuff...")
+    
+
     m1 = bin(12)[2:].zfill(4) 
     t1 = 13
     sig1 = ts.Sign(sk, m1, t1)
  
-    sys.exit()
-    
-
     if not ts.Verify(vk, sig1, m1, t1):
         print("Verification failed")
     else:
         print("Passed Sign test")
 
-    m2 = bin(15).zfill(4)
+    m2 = bin(15)[2:].zfill(4)
     t2 = 10
     sig2 = ts.AltSign(vk, m1, t1, sig1, m2, t2)
 
