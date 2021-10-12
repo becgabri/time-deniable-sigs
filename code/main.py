@@ -2,12 +2,10 @@
 from HIBE.hibenc_lew11 import HIBE_LW11 
 import timelockpuzzle.puzzle as puzzle 
 import math
-import json
-from json import JSONEncoder, JSONDecoder
 from charm.toolbox.pairinggroup import GT, PairingGroup 
 import sys
-import threading 
-import copy
+import threading
+from cryptography.hazmat.primitives import hashes
 
 # this is the size of time stamps supported
 TIME_SIZE_L = 32
@@ -66,31 +64,6 @@ def findPrefix(list_sk_t, t_prime):
             beg = curr_idx
         else:
             end = curr_idx
-
-class KeyEncoder(JSONEncoder):
-    def default(self, o):
-        group = PairingGroup('SS512')
- 
-        if isinstance(o, bytes):
-            return o.decode()
-        if group.ismember(o):
-            return group.serialize(o, compression=False)
-        raise ValueError("Unexpected element in key encoder, please debug :(")
-
-class KeyDecoder(JSONDecoder):
-    def __init__(self,*args, **kwargs):
-        json.JSONDecoder.__init__(self, object_hook=self.object_hook, *args, **kwargs) 
-
-    def object_hook(self, obj):
-        group = PairingGroup('SS512')
-        if isinstance(obj, dict):
-            for i,val in obj.items():
-                if isinstance(val, list):
-                    for i2, val2 in enumerate(val):
-                        for i3, val3 in enumerate(val2):
-                            pairing_elt = group.deserialize(val3.encode(), compression=False)
-                            obj[i][i2][i3] = pairing_elt
-        return obj
     
 def serializerHelper(group, pairing_elt, shared_dict, needed_idx):
     #group, pairing_elt, shared_dict, needed_idx = args
@@ -295,13 +268,22 @@ class TimeDeniableSig:
         idx = findPrefix(list_keys, t)
         lenPrefix = len(list_keys[idx][0])
 
+        # doing what you commonly do in signature schemes, and using a 
+        # hash of the message instead of the actual message, also shoving
+        # this into ONE ID vs. have it be in multiple 
+        hash_accum = hashes.Hash(hashes.SHA256())
+        encoded_msg = m.encode()
+        encoded_msg = str(len(encoded_msg)).encode() + encoded_msg
+        hash_accum.update(encoded_msg)
+        hashed_msg = hash_accum.finalize().hex()
+
         t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
-        encedID = encodeIdentity(t_bin+m)
+        encedID = encodeIdentity(t_bin)
+
+        # do some identity packing
+        encedID.append(encedID[-1]+hashed_msg)
+
         curr_key = list_keys[idx][1]
-        """
-        for j in range(len(encedID)-lenPrefix):
-            curr_key = self.hibe.delegate(pk_prime, curr_key, encedID[:lenPrefix+j+1])  
-        """
         return self.hibe.delegate(pk_prime, curr_key, encedID)
 
     # assumption right now is message is a binary string 
@@ -316,8 +298,6 @@ class TimeDeniableSig:
         # note here, doing this clobbers the OG thing
         # after this it's not the same  
         pt = serialize(list_keys)
-        #pt_str = json.dumps(list_keys,cls=KeyEncoder)
-        #pt = pt_str.encode()
 
         _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
         return ((n,a,bar_t,enc_key, enc_msg), s)
@@ -330,26 +310,35 @@ class TimeDeniableSig:
         c, _ = sigma_0 
         n, a, bar_t, enc_key, enc_msg = c 
         keys_as_bytes = puzzle.decrypt(n, a, bar_t, enc_key, enc_msg)
-        #list_keys = json.loads(keys_as_bytes.decode(), cls=KeyDecoder)
         list_keys = deserialize(keys_as_bytes)
         # need to shrink w/ FS DELEG
         new_list_keys = self.FSDelegate(pk, t_0, (pk, list_keys), t)
         s = self.FSSign((pk, new_list_keys), t, m)
         
-        #pt = json.dumps(new_list_keys, cls=KeyEncoder).encode()
         pt = serialize(new_list_keys)
         _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
         return ((n,a,bar_t,enc_key,enc_msg), s)
 
-    #it's assumed m is a bit string, t is a numerical value
+    #it's assumed m is a string, t is a numerical value
     def Verify(self, vk, sigma, m, t):
         pk,_ = vk
         _, sk_id = sigma
         t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
 
+        # reconstruct the right identity
+        hash_accum = hashes.Hash(hashes.SHA256())
+        encoded_msg = m.encode()
+        encoded_msg = str(len(encoded_msg)).encode() + encoded_msg
+        hash_accum.update(encoded_msg)
+        hashed_msg = hash_accum.finalize().hex()
+
+        identity = encodeIdentity(t_bin)
+        identity.append(identity[-1]+hashed_msg)
+                
+
+        # encrypt/decrypt check
         test_elt = self.group.random(GT)
-        # encrypt/decrypt check -- problem(!) think this has to be a Group elt. in target group G_T
-        ct = self.hibe.encrypt(test_elt, encodeIdentity(t_bin+m), pk)
+        ct = self.hibe.encrypt(test_elt, identity, pk)
 
         if self.hibe.decrypt(ct, sk_id) == test_elt:
             return True
@@ -411,7 +400,7 @@ if __name__ == "__main__":
     # I don't know what the security of the pairing scheme actually corresponds to :( 
     # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know but it could be that this corresponds to 80 bits of security (1024 bit DH)
     vk, sk = ts.KeyGen(fakeTimeParam, 256)
-
+    """
     # need to check right if deserialization/serialization is correct
     pk, timeGap, sk_prime = sk
     list_keys = ts.FSKeygen((pk, sk_prime), 13)
@@ -424,17 +413,18 @@ if __name__ == "__main__":
         sys.exit()
     else:
         print("Key encoding seems okay, checking other stuff...")
-    
+    """
 
-    m1 = bin(12)[2:].zfill(4) 
+    m1 = "Ashnikko is a badass and I really want to rest :( please send me motivation"
     t1 = 13
     sig1 = ts.Sign(sk, m1, t1)
+    sys.exit()
  
     if not ts.Verify(vk, sig1, m1, t1):
         print("Verification failed")
     else:
         print("Passed Sign test")
-
+    sys.exit()
     m2 = bin(15)[2:].zfill(4)
     t2 = 10
     sig2 = ts.AltSign(vk, m1, t1, sig1, m2, t2)
