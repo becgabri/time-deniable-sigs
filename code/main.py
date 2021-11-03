@@ -1,15 +1,19 @@
  
-from HIBE.hibenc_lew11 import HIBE_LW11 
+from HIBE.parallelize_hibenc_lew11 import HIBE_LW11 
 import timelockpuzzle.puzzle as puzzle 
 import math
 from charm.toolbox.pairinggroup import GT, PairingGroup 
 import sys
 import threading
 from cryptography.hazmat.primitives import hashes
+from datetime import datetime
+import time
+import copy 
 
-# this is the size of time stamps supported
-TIME_SIZE_L = 32
-MACHINE_SPEED = 10 # this should be the number of squarings a machine can do per second
+TIME_SIZE_L = 32 # this is the length of the path in the tree
+N = 2 #controls the identity tree (makes it N-ary)
+MAX_TIME = N**TIME_SIZE_L - 1 # this is the maximum time supported
+MACHINE_SPEED = 5883206 # this is the poor man's way, just timed how long it took on my machine
 
 # It's expected that id here is a binary string 
 def encodeIdentity(id):
@@ -22,8 +26,8 @@ def encodeIdentity(id):
 
 # attempts to represent n in the base b 
 # returns a list of elements z that satisfies
-# \sum i in len(z) b^i * z[i] = m
-def repr_base(m, b):
+# \sum i in len(z) b^i * z[i] = m and len(z) = padd_size
+def repr_base(m, b, padd_size):
     if b < 1:
         raise ValueError('Base you want to use must be a positive number')
     if m < 0: 
@@ -38,6 +42,8 @@ def repr_base(m, b):
         repr.append(val_at_idx)
         accum -= curr_val
         i += 1
+    if padd_size > len(repr):
+        repr.extend([0]*(padd_size - len(repr)))
     return repr
 
 def reconstruct_num(list_vals, base_b):
@@ -198,6 +204,7 @@ class TimeDeniableSig:
         idx_for_prefix = findPrefix(list_sk_t, t_prime)
         prefix_len = len(list_sk_t[idx_for_prefix][0]) 
         t_prime_as_bits = bin(t_prime)[2:].zfill(TIME_SIZE_L)
+	
         #print("T_prime:{}\nPrefix:{}\nKey Index:{}\n".format(t_prime_as_bits, list_sk_t[idx_for_prefix][0], idx_for_prefix))
 
         # if there are keys before the prefix point, just randomize and keep those
@@ -396,11 +403,26 @@ if __name__ == "__main__":
     """
     ts = TimeDeniableSig()
     
-    fakeTimeParam = 20
+    fakeTimeParam = 60*60*24
     # I don't know what the security of the pairing scheme actually corresponds to :( 
     # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know but it could be that this corresponds to 80 bits of security (1024 bit DH)
     vk, sk = ts.KeyGen(fakeTimeParam, 256)
-    """
+    
+    m1 = "Cryptography rearranges power: it configures who can do what, from what."
+    t1 = 1634098632 # just took this
+    curr_date = datetime.fromtimestamp(t1)
+    print("Date and time used with: {}".format(curr_date))
+    avg_time = 0
+    for i in range(50):
+        beg_ticker = time.time()
+        ts.Sign(sk, m1,t1)
+        duration = time.time() - beg_ticker
+        print(duration)
+        avg_time += duration
+    avg_time = avg_time / 50
+    print("Average time for parameter {} was {} seconds".format(fakeTimeParam/60,avg_time))
+    sys.exit()
+    """ 
     # need to check right if deserialization/serialization is correct
     pk, timeGap, sk_prime = sk
     list_keys = ts.FSKeygen((pk, sk_prime), 13)
@@ -413,12 +435,11 @@ if __name__ == "__main__":
         sys.exit()
     else:
         print("Key encoding seems okay, checking other stuff...")
-    """
+    """ 
 
-    m1 = "Ashnikko is a badass and I really want to rest :( please send me motivation"
-    t1 = 13
+    m1 = "Some text"
+    t1 = int(time.time())
     sig1 = ts.Sign(sk, m1, t1)
-    sys.exit()
  
     if not ts.Verify(vk, sig1, m1, t1):
         print("Verification failed")

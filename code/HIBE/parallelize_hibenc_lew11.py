@@ -17,9 +17,27 @@ Unbounded HIBE and Attribute-Based Encryption
 from charm.toolbox.pairinggroup import ZR,G1,G2,GT,pair,PairingGroup
 from charm.core.math.integer import integer,bitsize
 from charm.toolbox.matrixops import *
- 
+from multiprocessing import Process, Queue
 
-debug = False
+# let's shove all 10 operations together b/c it'll be easier to deal with 
+# it is assumed that g=SK['g'][idx_g], this is a hack for
+# speed and because python :P 
+def gOp(g, idx_g, arr, idx_arr, qu):
+	group = PairingGroup('SS512')        
+	vector_group_elts = [g[x]**arr[idx_arr] for x in range(10)]		
+	for x in range(10): 
+		vector_group_elts[x] = group.serialize(vector_group_elts[x], compression=False)
+	#print("Putting into the queue vector of elements for index {} elements {}".format(idx_g, vector_group_elts))
+	qu.put((idx_g, vector_group_elts))
+
+# it is assumed here that g = SK['g'][idx_g] 
+def gOp2(g, idx_g, elt, qu):
+	group = PairingGroup('SS512')        
+	vector_group_elts = [g[x]**elt for x in range(10)]
+	for x in range(10): 
+		vector_group_elts[x] = group.serialize(vector_group_elts[x], compression=False)
+	#print("Putting into the queue vector of elements for index {} elements {}".format(idx_g, vector_group_elts))
+	qu.put((idx_g, vector_group_elts))
 
 # cheap hack-y trick this sucks
 # returns a copy of the list
@@ -28,8 +46,9 @@ def copy(list_copy):
 	for i in range(len(list_copy)):
 		new_g.append(group.init(G1))
 		new_g[i] = list_copy[i]
-	return new_g 
+	return new_g
 
+debug = False
 class HIBE_LW11:
 	"""
 	>>> from charm.toolbox.pairinggroup import GT,PairingGroup
@@ -109,18 +128,36 @@ class HIBE_LW11:
 		w.append(MSK['a2'] - sum(w))
 		K = [0 for x in range(len(I))]
 		g = [0 for x in range(6)]
-		for i in range(len(I)):            
-			g[0] = [MSK['g'][0][x]**y[i] for x in range(10)]
-			g[1] = [MSK['g'][1][x]**w[i] for x in range(10)]
-			g[2] = [MSK['g'][4][x]**(r1[i]* group.hash(I[i], ZR)) for x in range(10)]
-			g[3] = [MSK['g'][5][x]**(-r1[i]) for x in range(10)]
-			g[4] = [MSK['g'][6][x]**(r2[i]* group.hash(I[i], ZR)) for x in range(10)]
-			g[5] = [MSK['g'][7][x]**(-r2[i]) for x in range(10)]
+		for i in range(len(I)):
+			for idx in range(6):
+				g[idx] = [0] * 10
+			list_procs = []
+			qu = Queue()
+			list_procs.append(Process(target=gOp, args=(MSK['g'][0],0,y,i,qu,)))
+			list_procs.append(Process(target=gOp, args=(MSK['g'][1],1,w,i,qu,)))
+
+			passElt = r1[i]*group.hash(I[i],ZR)
+			list_procs.append(Process(target=gOp2, args=(MSK['g'][4],2,passElt,qu,)))
+			passElt2 = -r1[i]
+			list_procs.append(Process(target=gOp2, args=(MSK['g'][5],3,passElt2,qu,)))
+			passElt3 = r2[i]*group.hash(I[i],ZR)
+			list_procs.append(Process(target=gOp2, args=(MSK['g'][6],4,passElt3,qu,)))
+			passElt4 = -r2[i]
+			list_procs.append(Process(target=gOp2, args=(MSK['g'][7],5,passElt4,qu,)))
+			for p in list_procs:
+				p.start()
+			for p in list_procs:
+				p.join()
+			for x in range(6):
+				#print("Trying to recv")
+				keyWithVal = qu.get()
+				#print("Got vector for idx {} of elements {}".format(keyWithVal[0], keyWithVal[1]))
+				new_vector = [group.deserialize(keyWithVal[1][x], compression=False) for x in range(10)]
+				g[keyWithVal[0]] = new_vector
 			K[i] = [g[0][x]*g[1][x]*g[2][x]*g[3][x]*g[4][x]*g[5][x]  for x in range(10)]  
 		g = []
-		
 		g.append(copy(MSK['g'][2]))
-		g.append(copy(MSK['g'][3])) 
+		g.append(copy(MSK['g'][3]))
 		g.append(copy(MSK['g'][4])) 
 		g.append(copy(MSK['g'][5])) 
 		g.append(copy(MSK['g'][6])) 
@@ -205,9 +242,11 @@ class HIBE_LW11:
 
 if __name__ == "__main__":
     group = PairingGroup('SS512', secparam=512)
+    
     msg = group.random(GT)
     print("Message to encrypt:")
     print(msg)
+    
     I = [".gr.edu.mmlab"]
     I2 = [".gr.edu.mmlab","mail"]
     I3 = [".gr.edu.mmlab","mail", "fotiou"]
