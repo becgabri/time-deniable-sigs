@@ -9,13 +9,17 @@ from cryptography.hazmat.primitives import hashes
 from datetime import datetime
 import time
 import copy 
+import unittest
 
 TIME_SIZE_L = 32 # this is the length of the path in the tree
 N = 2 #controls the identity tree (makes it N-ary)
 MAX_TIME = N**TIME_SIZE_L - 1 # this is the maximum time supported
 MACHINE_SPEED = 5883206 # this is the poor man's way, just timed how long it took on my machine
 
-# It's expected that id here is a binary string 
+# Require: id is a string
+# Effects: outputs a list of strings as long as ID -- this
+# is needed for encoding according to the original work
+# of lewko-waters 
 def encodeIdentity(id):
     list_id = []
     curr_id = ""
@@ -25,35 +29,38 @@ def encodeIdentity(id):
     return list_id
 
 # attempts to represent n in the base b 
-# returns a list of elements z that satisfies
-# \sum i in len(z) b^i * z[i] = m and len(z) = padd_size
+# returns a string z that satisfies
+# \sum i in len(z) b^(len(z)-1-i) * z[i] = m and len(z) = padd_size
 def repr_base(m, b, padd_size):
     if b < 1:
         raise ValueError('Base you want to use must be a positive number')
     if m < 0: 
         raise ValueError('Number you want to represent must also be positive')
 
-    repr = []
+    repr = ""
     accum = m
     i = 1
     while accum != 0:
         curr_val = accum % (b**i)
         val_at_idx = int(curr_val / b**(i-1)) 
-        repr.append(val_at_idx)
+        repr += str(val_at_idx)
         accum -= curr_val
         i += 1
     if padd_size > len(repr):
-        repr.extend([0]*(padd_size - len(repr)))
-    return repr
+        repr += "0"*(padd_size - len(repr))
+    return "".join(reversed(repr))
 
-def reconstruct_num(list_vals, base_b):
+# Requires: numerical_repr is a string where each character
+# is one of 0... b-1. Where the highest index is assoc. with b^0 (this is the opposite of normal where lowest index is assoc. with b^0)
+def reconstruct_num(numerical_repr, base_b):
+    length_str = len(numerical_repr)
     sum = 0
-    for idx, val in enumerate(list_vals):
-        sum += (val * base_b**idx)
+    for i in range(length_str):
+        sum += int(numerical_repr[i]) * base_b**(length_str-1-i)
     return sum 
 
 def findPrefix(list_sk_t, t_prime):
-    t_prime_bin = bin(t_prime)[2:].zfill(TIME_SIZE_L)
+    t_prime_str = repr_base(t_prime, N, TIME_SIZE_L)
 
     # start search halfway through list -- this is basically binary search
     beg = 0
@@ -61,12 +68,12 @@ def findPrefix(list_sk_t, t_prime):
     
     while True:
         curr_idx = int(math.floor((end + beg) / 2))
-        prefix_cut = t_prime_bin[:len(list_sk_t[curr_idx][0])]
+        prefix_cut = t_prime_str[:len(list_sk_t[curr_idx][0])]
         if prefix_cut == list_sk_t[curr_idx][0]:
             # end condition
             # print("Returning index: {}\nPrefix: {}\nActual ID: {}\n".format(curr_idx, list_sk_t[curr_idx][0], t_prime_bin))
             return curr_idx
-        elif int(prefix_cut,2) > int(list_sk_t[curr_idx][0], 2):
+        elif int(prefix_cut,N) > int(list_sk_t[curr_idx][0], N):
             beg = curr_idx
         else:
             end = curr_idx
@@ -203,7 +210,7 @@ class TimeDeniableSig:
         #find prefix using binary search 
         idx_for_prefix = findPrefix(list_sk_t, t_prime)
         prefix_len = len(list_sk_t[idx_for_prefix][0]) 
-        t_prime_as_bits = bin(t_prime)[2:].zfill(TIME_SIZE_L)
+        t_prime_as_base_n = repr_base(t_prime, N, TIME_SIZE_L)
 	
         #print("T_prime:{}\nPrefix:{}\nKey Index:{}\n".format(t_prime_as_bits, list_sk_t[idx_for_prefix][0], idx_for_prefix))
 
@@ -218,55 +225,61 @@ class TimeDeniableSig:
         curr_id = curr_id[:len(curr_id)-1]
         extract_key = list_sk_t[idx_for_prefix][1]
         for i in range(prefix_len-1, TIME_SIZE_L-1):
-            string_left_mask = (1 << (TIME_SIZE_L-i-1)) -1
-            if t_prime_as_bits[i] == '0' and int(t_prime_as_bits[i+1:],2) == string_left_mask:
+            string_left_mask = (N**(TIME_SIZE_L-i-1)) -1
+            if t_prime_as_base_n[i] != str(N-1) and reconstruct_num(t_prime_as_base_n[i+1:],N) == string_left_mask:
                 #print("Adding key for {}\n".format(curr_id+'0'))
-                # problem, probably have to call delegate multiple times here :( 
-                idAsEncoded = encodeIdentity(curr_id+'0')
-                new_list.append((curr_id + '0', self.hibe.delegate(pk, extract_key, idAsEncoded)))
+                for node in range(int(t_prime_as_base_n)+1):
+                    idAsEncoded = encodeIdentity(curr_id+str(node))
+                    new_list.append((curr_id + str(node), self.hibe.delegate(pk, extract_key, idAsEncoded)))
                 return new_list
-            elif t_prime_as_bits[i] == '1' and i != (TIME_SIZE_L - 1):
+            elif t_prime_as_base_n[i] != '0' and i != (TIME_SIZE_L - 1):
                 #print("Adding key for {}\n".format(curr_id+'0'))
-                idAsEncoded = encodeIdentity(curr_id+'0')
-                new_list.append((curr_id + '0', self.hibe.delegate(pk, extract_key, idAsEncoded)))
+                for node in range(int(t_prime_as_base_n[i])+1):
+                    idAsEncoded = encodeIdentity(curr_id+str(node))
+                    new_list.append((curr_id + str(node), self.hibe.delegate(pk, extract_key, idAsEncoded)))
 
-            curr_id += t_prime_as_bits[i]
+            curr_id += t_prime_as_base_n[i]
 
-        if t_prime_as_bits[TIME_SIZE_L-1] == '0' and t_prime < t: 
+        if t_prime_as_base_n[TIME_SIZE_L-1] != str(N-1) and t_prime < t: 
             #print("Adding key for {}\n".format(t_prime_as_bits))
-            idAsEncoded = encodeIdentity(t_prime_as_bits)
-            new_list.append((t_prime_as_bits, self.hibe.delegate(pk, extract_key, idAsEncoded))) 
+            for node in range(int(t_prime_as_base_n[TIME_SIZE_L-1])+1):
+                idAsEncoded = encodeIdentity(t_prime_as_base_n[:TIME_SIZE_L-1]+str(node))
+  
+                new_list.append((t_prime_as_base_n[:TIME_SIZE_L-1]+str(node), self.hibe.delegate(pk, extract_key, idAsEncoded))) 
 
         return new_list
 
     # going down from the root
     # sk_prime - mpk and msk from HIBE
-    # t - a number within the appropriate range t < 2^TIME_SIZE_L
+    # t - a number within the appropriate range t < N^TIME_SIZE_L - 1 # don't want max b/c the tree's messed up
     def FSKeygen(self, sk_prime, t):
         pk, sk = sk_prime 
         list_keys = []
-        t_as_bits = bin(t)[2:].zfill(TIME_SIZE_L) 
+        t_in_base_n = repr_base(t, N, TIME_SIZE_L) 
         curr_id = ''
 
         # ignoring the edge case that messes everything up
-        if t == (1 << TIME_SIZE_L) -1:
+        if t == (N**TIME_SIZE_L) -1:
             raise ValueError("Do not support extracting key of maximum value {}".format((1 << TIME_SIZE_L)-1))
         
         for i in range(TIME_SIZE_L-1):
-            string_left_mask = (1 << (TIME_SIZE_L - i -1)) - 1
-            if t_as_bits[i] == '0' and int(t_as_bits[i+1:],2) == string_left_mask:
-                add_key = self.hibe.keyGen(encodeIdentity(curr_id+'0'), sk, pk)
-                list_keys.append((curr_id+'0', add_key))
+            string_left_mask = (N**(TIME_SIZE_L -1-i)) - 1
+            if t_in_base_n[i] != str(N-1) and reconstruct_num(t_in_base_n[i+1:],N) == string_left_mask:
+                for node in range(int(t_in_base_n[i])+1):
+                    add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
+                    list_keys.append((curr_id+str(node), add_key))
                 return list_keys
-            elif t_as_bits[i] == '1' and i != (TIME_SIZE_L - 1):
-                add_key = self.hibe.keyGen(encodeIdentity(curr_id+'0'), sk, pk)
-                list_keys.append((curr_id+'0', add_key))
+            elif t_in_base_n[i] != '0' and i != (TIME_SIZE_L - 1):
+                for node in range(int(t_in_base_n[i])+1):
+                    add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
+                    list_keys.append((curr_id+str(node), add_key))
             # you should add here the path you're going down next?  
-            curr_id += t_as_bits[i]
+            curr_id += t_in_base_n[i]
 
-        if t_as_bits[TIME_SIZE_L-1] == '0':
-            add_key = self.hibe.keyGen(encodeIdentity(t_as_bits), sk, pk)
-            list_keys.append((t_as_bits, add_key)) 
+        if t_in_base_n[TIME_SIZE_L-1] != str(N-1):
+            for node in range(int(t_in_base_n[TIME_SIZE_L-1])+1):
+                add_key = self.hibe.keyGen(encodeIdentity(t_in_base_n[:TIME_SIZE_L-1]+str(node)), sk, pk)
+                list_keys.append((t_in_base_n[:TIME_SIZE_L-1]+str(node), add_key)) 
 
         return list_keys
 
@@ -284,8 +297,8 @@ class TimeDeniableSig:
         hash_accum.update(encoded_msg)
         hashed_msg = hash_accum.finalize().hex()
 
-        t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
-        encedID = encodeIdentity(t_bin)
+        t_as_str = repr_base(t, N, TIME_SIZE_L)
+        encedID = encodeIdentity(t_as_str)
 
         # do some identity packing
         encedID.append(encedID[-1]+hashed_msg)
@@ -297,7 +310,6 @@ class TimeDeniableSig:
     def Sign(self, sk, m, t):
         # produce the signature on the message using the FS
         pk_prime, timeGap, sk_prime = sk
-        t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
 
         list_keys = self.FSKeygen((pk_prime, sk_prime), t)
         s = self.FSSign((pk_prime, list_keys), t, m)
@@ -330,7 +342,7 @@ class TimeDeniableSig:
     def Verify(self, vk, sigma, m, t):
         pk,_ = vk
         _, sk_id = sigma
-        t_bin = bin(t)[2:].zfill(TIME_SIZE_L)
+        t_as_str = repr_base(t, N, TIME_SIZE_L)
 
         # reconstruct the right identity
         hash_accum = hashes.Hash(hashes.SHA256())
@@ -339,7 +351,7 @@ class TimeDeniableSig:
         hash_accum.update(encoded_msg)
         hashed_msg = hash_accum.finalize().hex()
 
-        identity = encodeIdentity(t_bin)
+        identity = encodeIdentity(t_as_str)
         identity.append(identity[-1]+hashed_msg)
                 
 
@@ -352,11 +364,11 @@ class TimeDeniableSig:
         return False
 
 def keyEqual(dict1, dict2):
+    #import pdb; pdb.set_trace()
     for key, outer_list in dict1.items():
         if not key in dict2 or len(dict1[key]) != len(dict2[key]):
-            print("Is key {} in dict2? {}. Length in dict1: {}. Length in dict2: {}".format(key in dict2, len(dict1[key]), len(dict2[key])))
+            print("Is key {} in dict2? {}. Length in dict1: {}. Length in dict2: {}".format(key, key in dict2, len(dict1[key]), len(dict2[key])))
             return False
-        # {'K': [[Key 1 has 10 components      ], ... [Key i has 10 components       ]
         for idx, vals in enumerate(outer_list):
             # one more nested list here 
             if len(vals) != len(dict2[key][idx]):
@@ -381,26 +393,132 @@ def listKeysEqual(list1, list2):
             return False
     return True
 
+# not a true deep equal, only works for the identity assoc.
+# with the key, not the key itself b/c the alg. is randomized
+# list1 = [(id1, key1), ... ,(idn, keyn)]
+# list2 = [id1, ... , idn]
 def deepEqual(list1, list2): 
     if len(list1) != len(list2):
         return False
     for i,val in enumerate(list1):
-        if val != list2[i]:
+        if val[0] != list2[i]:
             return False
     return True
 
+
+# unit testing info 
+class TestUtils(unittest.TestCase):
+    def test_repr_1(self):
+        five = repr_base(5, 2,3)
+        self.assertEqual(reconstruct_num(five, 2),5)
+
+    def test_repr_2(self):
+        seven = repr_base(7,3,3)
+        self.assertEqual(reconstruct_num(seven, 3),7)
+
+
+class TestDeniableSigs(unittest.TestCase):
+    def setUp(self):
+        global TIME_SIZE_L
+        TIME_SIZE_L = 3 # this is the default, if you need something different you have to just re-run everything :( 
+        self.ts = TimeDeniableSig()
+        # param only needed for correctness so setting it
+        # to be very low
+        vk, sk = self.ts.KeyGen(1, 256)
+        self.vk = vk
+        self.sk = sk
+
+    def test_serialize(self):
+        pk, timeGap, sk_prime = self.sk
+        list_keys = self.ts.FSKeygen((pk, sk_prime), 13)
+        encoded = serialize(list_keys)
+        # remember, this function wrecks the current representation :P
+        pointCompressDecompress(deserializerHelper, list_keys)
+        decoded_keys = deserialize(encoded)
+        self.assertEqual(listKeysEqual(list_keys, decoded_keys),True)
+
+    def test_fskeygen_1(self):
+        pk, timeGap, sk_prime = self.sk
+        fsKeygen = [['0'], ['0', '100'], ['0', '10']]
+        for i, val in enumerate([3, 4, 5]):
+            self.assertEqual( deepEqual(self.ts.FSKeygen((pk, sk_prime), val), fsKeygen[i]), True) 
+        #"Incorrect key extracted for FSKeygen with time size 3, value {}".format(val)
+
+    # TODO: fix test, wrong time parameter
+    """
+    def test_fskeygen_2(self):
+        TIME_SIZE_L = 4 
+        fsKeygen = [['00', '0100']]
+        for i, val in enumerate([4]):
+            self.assertEqual(deepEqual(FSKeygen(dummy_sk, val), fsKeygen[i])), "Incorrect key extracted for FSKeygen with time size 4, value {}".format(val)
+    """
+    
+    def test_fsdelegate_1(self):    
+        pk, timeGap, sk_prime = self.sk
+        six_key = self.ts.FSKeygen((pk, sk_prime), 6)
+        four_key = ['0', '100']
+        
+        self.assertEqual(deepEqual(self.ts.FSDelegate(pk, 6, (pk, six_key), 4), four_key), True)
+        #"Incorrect delegate for time param 3, going from 6 to 4"
+        self.assertEqual(deepEqual(self.ts.FSDelegate(pk, 6, (pk, six_key), 3), ['0']), True)
+        #"Incorrect delegate for time param 3, going from 6 to 3"
+    # TODO: need to use this with another time parameter
+    """
+    def test_fsdelegate_2(self):
+        TIME_SIZE_L = 4
+        four_key_tl4 = ['00', '0100']
+        seven_key_tl4 = ['0']
+        ten_key_tl4 = ['0', '100', '1010']
+        assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 4), four_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 4"
+        assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 7), seven_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 7"
+        assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 10), ten_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 10"
+    
+
+    def test_all_sigs(self):
+        m1 = "Some text"
+        t1 = int(time.time())
+        sig1 = self.ts.Sign(self.sk, m1, t1)
+ 
+        self.assertEqual(self.ts.Verify(self.vk, sig1, m1, t1), True)
+        
+        m2 = bin(15)[2:].zfill(4)
+        t2 = 10
+        sig2 = self.ts.AltSign(self.vk, m1, t1, sig1, m2, t2)
+
+        self.assertEqual(self.ts.Verify(self.vk, sig2, m2, t2), True)
+
+        m3 = bin(7)[2:].zfill(4)
+        t3 = 2
+        sig3 = self.ts.AltSign(self.vk, m2, t2, sig2, m3, t3)
+
+        self.assertEqual(self.ts.Verify(self.vk, sig3, m3, t3), True)
+    """
+
+    def test_fskeygen_prefix1(self):
+        pk, timeGap, sk_prime = self.sk
+        six_key = self.ts.FSKeygen((pk, sk_prime), 6)
+        # should look like this 
+        # six_key = ['0', '10', '110']
+        self.assertEqual(findPrefix(six_key,4),1)
+        #"Incorrect prefix for 4 = 100, should be 1"
+        self.assertEqual(findPrefix(six_key, 3),0)
+        #"Incorrect prefix for 3 = 011, should be 2"
+        self.assertEqual(findPrefix(six_key, 2),0)
+        #"Incorrect prefix for 2 = 010, should be 2"
+
+    # TODO: test case is broken because it needs a 
+    # different time parameter
+    """
+    def test_fskeygen_prefix2(self):        
+        TIME_SIZE_L = 4
+        fourteen_key = ['0', '10', '110', '1110']
+        assert(findPrefix(fourteen_key, 12) == 2), "Incorrect prefix for 12 = 1100, should be 1"
+        assert(findPrefix(fourteen_key, 3) == 0), "Incorrect prefix for 3 = 0011, should be 3"
+        assert(findPrefix(fourteen_key, 5) == 0), "Incorrect prefix for 5 = 0101, should be 3"
+    """
+
 if __name__ == "__main__":
-    """
-    simpleTest1 = repr_base(5, 2)
-    if reconstruct_num(simpleTest1,2) != 5:
-        print("Failed simplest test")
     
-    simpleTest2 = repr_base(7,3)
-    if reconstruct_num(simpleTest2,3) != 7:
-        print("Failed simplest test")
-    
-    print("Staring Time Deniable Sig stuff")
-    """
     ts = TimeDeniableSig()
     
     fakeTimeParam = 60*60*24
@@ -421,95 +539,4 @@ if __name__ == "__main__":
         avg_time += duration
     avg_time = avg_time / 50
     print("Average time for parameter {} was {} seconds".format(fakeTimeParam/60,avg_time))
-    sys.exit()
-    """ 
-    # need to check right if deserialization/serialization is correct
-    pk, timeGap, sk_prime = sk
-    list_keys = ts.FSKeygen((pk, sk_prime), 13)
-    encoded = serialize(list_keys)
-    # remember, this function wrecks the current representation :P
-    pointCompressDecompress(deserializerHelper, list_keys)
-    decoded_keys = deserialize(encoded)
-    if not listKeysEqual(list_keys, decoded_keys):
-        print("Problem with encoder/decoder")
-        sys.exit()
-    else:
-        print("Key encoding seems okay, checking other stuff...")
-    """ 
-
-    m1 = "Some text"
-    t1 = int(time.time())
-    sig1 = ts.Sign(sk, m1, t1)
- 
-    if not ts.Verify(vk, sig1, m1, t1):
-        print("Verification failed")
-    else:
-        print("Passed Sign test")
-    sys.exit()
-    m2 = bin(15)[2:].zfill(4)
-    t2 = 10
-    sig2 = ts.AltSign(vk, m1, t1, sig1, m2, t2)
-
-    if not ts.Verify(vk, sig2, m2, t2):
-        print("Verification failed")
-    else:
-        print("Passed first AltSign test")
-
-    m3 = bin(7)[2:].zfill(4)
-    t3 = 2
-    sig3 = ts.AltSign(vk, m2, t2, sig2, m3, t3)
-
-    if not ts.Verify(vk, sig3, m3, t3):
-        print("Verification failed")
-    else: 
-        print("Passed second AltSign test")
-    
-
-    """ 
-    dummy_sk = (0,0)
-    print("Testing FSKeygen...")
-    
-    fsKeygen = [['0'], ['0', '100'], ['0', '10']]
-    for i, val in enumerate([3, 4, 5]):
-        assert( deepEqual(FSKeygen(dummy_sk, val), fsKeygen[i])), "Incorrect key extracted for FSKeygen with time size 3, value {}".format(val)
-    
-    TIME_SIZE_L = 4 
-    fsKeygen = [['00', '0100']]
-    for i, val in enumerate([4]):
-        assert( deepEqual(FSKeygen(dummy_sk, val), fsKeygen[i])), "Incorrect key extracted for FSKeygen with time size 4, value {}".format(val)
-
-    print("Passed FSKeygen tests.")
-    
-    TIME_SIZE_L = 3
-    print("Testing findPrefix...")
-
-    six_key = ['0', '10', '110']
-    assert ( findPrefix(six_key,4) == 1), "Incorrect prefix for 4 = 100, should be 1"
-
-    assert ( findPrefix(six_key, 3) == 0), "Incorrect prefix for 3 = 011, should be 2"
-    assert ( findPrefix(six_key, 2) == 0), "Incorrect prefix for 2 = 010, should be 2"
-
-    TIME_SIZE_L = 4
-    fourteen_key = ['0', '10', '110', '1110']
-    assert ( findPrefix(fourteen_key, 12) == 2), "Incorrect prefix for 12 = 1100, should be 1"
-    assert ( findPrefix(fourteen_key, 3) == 0), "Incorrect prefix for 3 = 0011, should be 3"
-    assert ( findPrefix(fourteen_key, 5) == 0), "Incorrect prefix for 5 = 0101, should be 3"
-    print("Passed findPrefix tests.")
-
-    TIME_SIZE_L = 3
-
-    print("Testing FSDelegate...")
-    four_key = ['0', '100']
-    dummy_pk = 0
-    assert( deepEqual(FSDelegate(dummy_pk, 6, (dummy_pk, six_key), 4), four_key)), "Incorrect delegate for time param 3, going from 6 to 4"
-    assert( deepEqual(FSDelegate(dummy_pk, 6, (dummy_pk, six_key), 3), ['0'])), "Incorrect delegate for time param 3, going from 6 to 3"
-    
-    TIME_SIZE_L = 4
-    four_key_tl4 = ['00', '0100']
-    seven_key_tl4 = ['0']
-    ten_key_tl4 = ['0', '100', '1010']
-    assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 4), four_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 4"
-    assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 7), seven_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 7"
-    assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 10), ten_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 10"
-    print("Passed FSDelegate tests.")
-    """
+     
