@@ -212,11 +212,11 @@ class TimeDeniableSig:
         prefix_len = len(list_sk_t[idx_for_prefix][0]) 
         t_prime_as_base_n = repr_base(t_prime, N, TIME_SIZE_L)
 	
-        #print("T_prime:{}\nPrefix:{}\nKey Index:{}\n".format(t_prime_as_bits, list_sk_t[idx_for_prefix][0], idx_for_prefix))
+        #print("T_prime:{}\nPrefix:{}\nKey Index:{}\n".format(t_prime_as_base_n, list_sk_t[idx_for_prefix][0], idx_for_prefix))
 
         # if there are keys before the prefix point, just randomize and keep those
         for i in range(idx_for_prefix):
-            #print("Adding re-randomized key for identity: {}\n".format(list_sk_t[i][0]))
+            print("Adding re-randomized key for identity: {}\n".format(list_sk_t[i][0]))
             new_list.append((list_sk_t[i][0], self.hibe.delegate(pk, list_sk_t[i][1], encodeIdentity(list_sk_t[i][0]))))
 
         # take the prefix and delegate off of what needs to be delegated
@@ -227,13 +227,12 @@ class TimeDeniableSig:
         for i in range(prefix_len-1, TIME_SIZE_L-1):
             string_left_mask = (N**(TIME_SIZE_L-i-1)) -1
             if t_prime_as_base_n[i] != str(N-1) and reconstruct_num(t_prime_as_base_n[i+1:],N) == string_left_mask:
-                #print("Adding key for {}\n".format(curr_id+'0'))
-                for node in range(int(t_prime_as_base_n)+1):
+                # this should be over the current level
+                for node in range(int(t_prime_as_base_n[i])+1):
                     idAsEncoded = encodeIdentity(curr_id+str(node))
                     new_list.append((curr_id + str(node), self.hibe.delegate(pk, extract_key, idAsEncoded)))
                 return new_list
             elif t_prime_as_base_n[i] != '0' and i != (TIME_SIZE_L - 1):
-                #print("Adding key for {}\n".format(curr_id+'0'))
                 for node in range(int(t_prime_as_base_n[i])+1):
                     idAsEncoded = encodeIdentity(curr_id+str(node))
                     new_list.append((curr_id + str(node), self.hibe.delegate(pk, extract_key, idAsEncoded)))
@@ -241,7 +240,7 @@ class TimeDeniableSig:
             curr_id += t_prime_as_base_n[i]
 
         if t_prime_as_base_n[TIME_SIZE_L-1] != str(N-1) and t_prime < t: 
-            #print("Adding key for {}\n".format(t_prime_as_bits))
+            print("Adding key for {}\n".format(t_prime_as_base_n))
             for node in range(int(t_prime_as_base_n[TIME_SIZE_L-1])+1):
                 idAsEncoded = encodeIdentity(t_prime_as_base_n[:TIME_SIZE_L-1]+str(node))
   
@@ -270,7 +269,7 @@ class TimeDeniableSig:
                     list_keys.append((curr_id+str(node), add_key))
                 return list_keys
             elif t_in_base_n[i] != '0' and i != (TIME_SIZE_L - 1):
-                for node in range(int(t_in_base_n[i])+1):
+                for node in range(int(t_in_base_n[i])):
                     add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
                     list_keys.append((curr_id+str(node), add_key))
             # you should add here the path you're going down next?  
@@ -405,7 +404,7 @@ def deepEqual(list1, list2):
             return False
     return True
 
-
+"""
 # unit testing info 
 class TestUtils(unittest.TestCase):
     def test_repr_1(self):
@@ -415,8 +414,55 @@ class TestUtils(unittest.TestCase):
     def test_repr_2(self):
         seven = repr_base(7,3,3)
         self.assertEqual(reconstruct_num(seven, 3),7)
+"""
 
+class TestTreeThreeSig(unittest.TestCase):
+    def setUp(self):
+        global TIME_SIZE_L, N
+        N = 3
+        TIME_SIZE_L = 2 # this is the default, if you need something different you have to just re-run everything :( 
+        self.ts = TimeDeniableSig()
+        # param only needed for correctness so setting it
+        # to be very low
+        vk, sk = self.ts.KeyGen(1, 256)
+        self.vk = vk
+        self.sk = sk
 
+    def test_simpleKeyGens(self):
+        pk, timeGap, sk_prime = self.sk
+        seven_key = self.ts.FSKeygen((pk, sk_prime), 7)
+        seventh_k = ['0', '1', '20', '21']
+        self.assertEqual(deepEqual(seven_key, seventh_k),True)
+
+        self.assertEqual(deepEqual(self.ts.FSKeygen((pk, sk_prime), 0),['00']), True)
+
+        self.assertEqual(deepEqual(self.ts.FSKeygen((pk, sk_prime), 3), ['0','10']), True)
+
+    def test_simpleDelegate(self):
+        pk, timeGap, sk_prime = self.sk 
+        fifth_key = self.ts.FSKeygen((pk, sk_prime), 5)
+        fifth_ids = ['0', '1']
+        self.assertEqual(deepEqual(fifth_key, fifth_ids), True)
+
+        two_key = self.ts.FSDelegate(pk, 5, (pk, fifth_key), 2)
+        import pdb; pdb.set_trace()
+        fourth_key = self.ts.FSDelegate(pk, 5, (pk, fifth_key), 4)
+
+        self.assertEqual(deepEqual(two_key, ['0']),True)
+        self.assertEqual(deepEqual(fourth_key, ['0','10','11']),True)
+
+    def test_sign_altsign(self):
+        m = '12121'
+        t = 6
+        sigma = self.ts.Sign(self.sk, m, t)
+        self.assertEqual(self.ts.Verify(self.vk, sigma, m, t), True)
+        
+        new_m = '2101201'
+        new_t = 1
+        new_sigma = self.ts.AltSign(self.vk, m, t, sigma,new_m, new_t) 
+        self.assertEqual(self.ts.Verify(self.vk, new_sigma, new_m, new_t), True)
+
+"""
 class TestDeniableSigs(unittest.TestCase):
     def setUp(self):
         global TIME_SIZE_L
@@ -445,25 +491,28 @@ class TestDeniableSigs(unittest.TestCase):
         #"Incorrect key extracted for FSKeygen with time size 3, value {}".format(val)
 
     # TODO: fix test, wrong time parameter
-    """
+    
     def test_fskeygen_2(self):
         TIME_SIZE_L = 4 
         fsKeygen = [['00', '0100']]
         for i, val in enumerate([4]):
             self.assertEqual(deepEqual(FSKeygen(dummy_sk, val), fsKeygen[i])), "Incorrect key extracted for FSKeygen with time size 4, value {}".format(val)
-    """
+    
     
     def test_fsdelegate_1(self):    
         pk, timeGap, sk_prime = self.sk
         six_key = self.ts.FSKeygen((pk, sk_prime), 6)
         four_key = ['0', '100']
-        
-        self.assertEqual(deepEqual(self.ts.FSDelegate(pk, 6, (pk, six_key), 4), four_key), True)
+
+        new_four_key = self.ts.FSDelegate(pk,6,(pk,six_key),4)
+        self.assertEqual(deepEqual(new_four_key, four_key), True)
         #"Incorrect delegate for time param 3, going from 6 to 4"
-        self.assertEqual(deepEqual(self.ts.FSDelegate(pk, 6, (pk, six_key), 3), ['0']), True)
+        import pdb; pdb.set_trace()
+        new_third_key = self.ts.FSDelegate(pk, 6, (pk, six_key), 3) 
+        self.assertEqual(deepEqual(new_third_key, ['0']), True)
         #"Incorrect delegate for time param 3, going from 6 to 3"
     # TODO: need to use this with another time parameter
-    """
+    
     def test_fsdelegate_2(self):
         TIME_SIZE_L = 4
         four_key_tl4 = ['00', '0100']
@@ -476,23 +525,23 @@ class TestDeniableSigs(unittest.TestCase):
 
     def test_all_sigs(self):
         m1 = "Some text"
-        t1 = int(time.time())
+        t1 = 5
         sig1 = self.ts.Sign(self.sk, m1, t1)
  
         self.assertEqual(self.ts.Verify(self.vk, sig1, m1, t1), True)
         
         m2 = bin(15)[2:].zfill(4)
-        t2 = 10
+        t2 = 2
         sig2 = self.ts.AltSign(self.vk, m1, t1, sig1, m2, t2)
 
         self.assertEqual(self.ts.Verify(self.vk, sig2, m2, t2), True)
 
         m3 = bin(7)[2:].zfill(4)
-        t3 = 2
+        t3 = 1
         sig3 = self.ts.AltSign(self.vk, m2, t2, sig2, m3, t3)
 
         self.assertEqual(self.ts.Verify(self.vk, sig3, m3, t3), True)
-    """
+    
 
     def test_fskeygen_prefix1(self):
         pk, timeGap, sk_prime = self.sk
@@ -505,10 +554,10 @@ class TestDeniableSigs(unittest.TestCase):
         #"Incorrect prefix for 3 = 011, should be 2"
         self.assertEqual(findPrefix(six_key, 2),0)
         #"Incorrect prefix for 2 = 010, should be 2"
-
+    
     # TODO: test case is broken because it needs a 
     # different time parameter
-    """
+    
     def test_fskeygen_prefix2(self):        
         TIME_SIZE_L = 4
         fourteen_key = ['0', '10', '110', '1110']
@@ -518,7 +567,8 @@ class TestDeniableSigs(unittest.TestCase):
     """
 
 if __name__ == "__main__":
-    
+    unittest.main()
+    """    
     ts = TimeDeniableSig()
     
     fakeTimeParam = 60*60*24
@@ -539,4 +589,4 @@ if __name__ == "__main__":
         avg_time += duration
     avg_time = avg_time / 50
     print("Average time for parameter {} was {} seconds".format(fakeTimeParam/60,avg_time))
-     
+    """ 
