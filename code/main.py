@@ -11,8 +11,8 @@ import time
 import copy 
 import unittest
 
-TIME_SIZE_L = 32 # this is the length of the path in the tree
-N = 2 #controls the identity tree (makes it N-ary)
+TIME_SIZE_L = 8 # this is the length of the path in the tree
+N = 17 #controls the identity tree (makes it N-ary)
 MAX_TIME = N**TIME_SIZE_L - 1 # this is the maximum time supported
 MACHINE_SPEED = 5883206 # this is the poor man's way, just timed how long it took on my machine
 
@@ -212,7 +212,7 @@ class TimeDeniableSig:
         prefix_len = len(list_sk_t[idx_for_prefix][0]) 
         t_prime_as_base_n = repr_base(t_prime, N, TIME_SIZE_L)
 	
-        #print("T_prime:{}\nPrefix:{}\nKey Index:{}\n".format(t_prime_as_base_n, list_sk_t[idx_for_prefix][0], idx_for_prefix))
+        print("T_prime:{}\nPrefix:{}\nKey Index:{}\n".format(t_prime_as_base_n, list_sk_t[idx_for_prefix][0], idx_for_prefix))
 
         # if there are keys before the prefix point, just randomize and keep those
         for i in range(idx_for_prefix):
@@ -222,18 +222,23 @@ class TimeDeniableSig:
         # take the prefix and delegate off of what needs to be delegated
         # this time, we go from the direction of "root" down to the leaf because in this context that makes more sense
         curr_id = list_sk_t[idx_for_prefix][0]
-        curr_id = curr_id[:len(curr_id)-1]
+        #curr_id = curr_id[:len(curr_id)-1]
         extract_key = list_sk_t[idx_for_prefix][1]
-        for i in range(prefix_len-1, TIME_SIZE_L-1):
-            string_left_mask = (N**(TIME_SIZE_L-i-1)) -1
-            if t_prime_as_base_n[i] != str(N-1) and reconstruct_num(t_prime_as_base_n[i+1:],N) == string_left_mask:
-                # this should be over the current level
-                for node in range(int(t_prime_as_base_n[i])+1):
-                    idAsEncoded = encodeIdentity(curr_id+str(node))
-                    new_list.append((curr_id + str(node), self.hibe.delegate(pk, extract_key, idAsEncoded)))
+        for i in range(prefix_len, TIME_SIZE_L):
+            string_left_mask = (N**(TIME_SIZE_L-i)) -1
+            # if t_prime_as_base_n[i] != str(N-1)
+            if reconstruct_num(t_prime_as_base_n[i:],N) == string_left_mask:
+                # this should be over the current level 
+                if curr_id != "":
+                    print("Adding key for {}", curr_id)
+                    idAsEncoded = encodeIdentity(curr_id)
+                    new_list.append((curr_id, self.hibe.delegate(pk, extract_key, idAsEncoded)))   
+                else:
+                    print("Experienced a weird error")
                 return new_list
-            elif t_prime_as_base_n[i] != '0' and i != (TIME_SIZE_L - 1):
-                for node in range(int(t_prime_as_base_n[i])+1):
+            elif t_prime_as_base_n[i] != '0':
+                for node in range(int(t_prime_as_base_n[i])):
+                    print("Adding key for {}", curr_id+str(node))
                     idAsEncoded = encodeIdentity(curr_id+str(node))
                     new_list.append((curr_id + str(node), self.hibe.delegate(pk, extract_key, idAsEncoded)))
 
@@ -241,10 +246,8 @@ class TimeDeniableSig:
 
         if t_prime_as_base_n[TIME_SIZE_L-1] != str(N-1) and t_prime < t: 
             print("Adding key for {}\n".format(t_prime_as_base_n))
-            for node in range(int(t_prime_as_base_n[TIME_SIZE_L-1])+1):
-                idAsEncoded = encodeIdentity(t_prime_as_base_n[:TIME_SIZE_L-1]+str(node))
-  
-                new_list.append((t_prime_as_base_n[:TIME_SIZE_L-1]+str(node), self.hibe.delegate(pk, extract_key, idAsEncoded))) 
+            idAsEncoded = encodeIdentity(t_prime_as_base_n)
+            new_list.append((t_prime_as_base_n, self.hibe.delegate(pk, extract_key, idAsEncoded))) 
 
         return new_list
 
@@ -404,7 +407,7 @@ def deepEqual(list1, list2):
             return False
     return True
 
-"""
+
 # unit testing info 
 class TestUtils(unittest.TestCase):
     def test_repr_1(self):
@@ -414,7 +417,7 @@ class TestUtils(unittest.TestCase):
     def test_repr_2(self):
         seven = repr_base(7,3,3)
         self.assertEqual(reconstruct_num(seven, 3),7)
-"""
+
 
 class TestTreeThreeSig(unittest.TestCase):
     def setUp(self):
@@ -445,7 +448,6 @@ class TestTreeThreeSig(unittest.TestCase):
         self.assertEqual(deepEqual(fifth_key, fifth_ids), True)
 
         two_key = self.ts.FSDelegate(pk, 5, (pk, fifth_key), 2)
-        import pdb; pdb.set_trace()
         fourth_key = self.ts.FSDelegate(pk, 5, (pk, fifth_key), 4)
 
         self.assertEqual(deepEqual(two_key, ['0']),True)
@@ -462,7 +464,7 @@ class TestTreeThreeSig(unittest.TestCase):
         new_sigma = self.ts.AltSign(self.vk, m, t, sigma,new_m, new_t) 
         self.assertEqual(self.ts.Verify(self.vk, new_sigma, new_m, new_t), True)
 
-"""
+
 class TestDeniableSigs(unittest.TestCase):
     def setUp(self):
         global TIME_SIZE_L
@@ -491,13 +493,13 @@ class TestDeniableSigs(unittest.TestCase):
         #"Incorrect key extracted for FSKeygen with time size 3, value {}".format(val)
 
     # TODO: fix test, wrong time parameter
-    
+    """
     def test_fskeygen_2(self):
         TIME_SIZE_L = 4 
         fsKeygen = [['00', '0100']]
         for i, val in enumerate([4]):
             self.assertEqual(deepEqual(FSKeygen(dummy_sk, val), fsKeygen[i])), "Incorrect key extracted for FSKeygen with time size 4, value {}".format(val)
-    
+    """
     
     def test_fsdelegate_1(self):    
         pk, timeGap, sk_prime = self.sk
@@ -512,7 +514,7 @@ class TestDeniableSigs(unittest.TestCase):
         self.assertEqual(deepEqual(new_third_key, ['0']), True)
         #"Incorrect delegate for time param 3, going from 6 to 3"
     # TODO: need to use this with another time parameter
-    
+    """
     def test_fsdelegate_2(self):
         TIME_SIZE_L = 4
         four_key_tl4 = ['00', '0100']
@@ -521,7 +523,7 @@ class TestDeniableSigs(unittest.TestCase):
         assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 4), four_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 4"
         assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 7), seven_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 7"
         assert(  deepEqual(FSDelegate(dummy_pk, 14, (dummy_pk, fourteen_key), 10), ten_key_tl4)), "Incorrect delegate for time param 4 going from 14 to 10"
-    
+    """
 
     def test_all_sigs(self):
         m1 = "Some text"
@@ -557,7 +559,7 @@ class TestDeniableSigs(unittest.TestCase):
     
     # TODO: test case is broken because it needs a 
     # different time parameter
-    
+    """
     def test_fskeygen_prefix2(self):        
         TIME_SIZE_L = 4
         fourteen_key = ['0', '10', '110', '1110']
@@ -567,8 +569,7 @@ class TestDeniableSigs(unittest.TestCase):
     """
 
 if __name__ == "__main__":
-    unittest.main()
-    """    
+        
     ts = TimeDeniableSig()
     
     fakeTimeParam = 60*60*24
@@ -589,4 +590,4 @@ if __name__ == "__main__":
         avg_time += duration
     avg_time = avg_time / 50
     print("Average time for parameter {} was {} seconds".format(fakeTimeParam/60,avg_time))
-    """ 
+    
