@@ -206,7 +206,7 @@ def deserialize(byte_string):
          
 
 class TimeDeniableSig:
-
+    # timeGap = number of seconds the time lock should last
     def KeyGen(self, timeGap, secParam):
         # this is the easiest one, just the 
         self.group = PairingGroup('SS512')
@@ -577,23 +577,22 @@ class TestDenSigLargerTree(unittest.TestCase):
 if __name__ == "__main__":
     #unittest.main()   
     ts = TimeDeniableSig()
-    
-    fakeTimeParam = 60*60*24
+    secperMin = 60
+    fakeTimeParam = 7*24*60*secperMin
     # I don't know what the security of the pairing scheme actually corresponds to :( 
     # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know but it could be that this corresponds to 80 bits of security (1024 bit DH)
     vk, sk = ts.KeyGen(fakeTimeParam, 256)
-    
     m1 = "Cryptography rearranges power: it configures who can do what, from what."
-    t1 = 1634098632 # just took this
+    t1 = 1634098632
     curr_date = datetime.fromtimestamp(t1)
     print("Date and time used with: {}".format(curr_date))
     avg_time = 0
-    for i in range(50):
+    for i in range(100):
         beg_ticker = time.time()
         ts.Sign(sk, m1,t1)
         duration = time.time() - beg_ticker
         print(duration)
         avg_time += duration
-    avg_time = avg_time / 50
-    print("Average time for parameter {} was {} seconds".format(fakeTimeParam/60,avg_time))
+    avg_time = avg_time / 100
+    print("Average time for tlp parameter {} seconds was {} seconds".format(fakeTimeParam,avg_time))
     
