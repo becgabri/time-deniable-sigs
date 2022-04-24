@@ -27,8 +27,7 @@ class HIDE_GS:
         QVals = []
         for i in range(t):
             # this would be dangerous if you allowed arbitrary length strings with arbitrary values
-            id_at_depth = "".join(I[:t+1])
-            P_i_plus_one = self.hashOntoG1(id_at_depth) 
+            P_i_plus_one = self.hashOntoG1(I[:i+1]) 
             s_i = self.group.random(ZR)
             if i == 0:
                 s_i = MSK["s0"]
@@ -42,7 +41,6 @@ class HIDE_GS:
     # input - PP public params, SK a secret key from keyGen with identity I', I the identity you want to extract a key for where I' is a prefix of I
     # output - secret key corresponding to I
     def delegate(self, PP, SK, I):
-        print("In delegate, have sk = {} and I = {}".format(SK, I))
         # prefix length *of the keys* always has len(Q) = len(I') - 1 bc we assume for a key len(I') = t, s_t for depth t is always produced "on the fly"
         prefix_len = len(SK["QVals"])
 
@@ -50,21 +48,19 @@ class HIDE_GS:
         Q_prime = []
         # re-randomize earlier components for privacy
         for i in range(prefix_len):
-            print("Re-randomizing earlier comps")
             s_prime = self.group.random(ZR)
             Q_prime.append(SK["QVals"][i]+PP["P0"]**s_prime)
-            id_elt = self.hashOntoG1("".join(I[:i+2]))
+            id_elt = self.hashOntoG1(I[:i+2])
             S_prime += id_elt**s_prime
         
         # new components - prefix_len + 1 = t so this starts at t+1 
         for j in range(prefix_len+2, len(I)+1):
             # pick your exponent for this level
-            print("Randomizing new component S_{}".format(j))
             s = self.group.random(ZR)
             Q = PP["P0"]**s
             Q_prime.append(Q)
 
-            P_j = self.hashOntoG1("".join(I[:j]))
+            P_j = self.hashOntoG1(I[:j])
             S_prime += P_j**s
             
         return {"S": S_prime, "QVals":Q_prime}
@@ -75,18 +71,16 @@ class HIDE_GS:
         id_val = self.hashOntoG1(I)
         
         # random exponent for encryption
-        #r = self.group.random(ZR)
-        r = self.group.init(type=ZR, value=3)
+        r = self.group.random(ZR)
         PVals = [PP["P0"]**r]
-        P1 = self.hashOntoG1(I[0])
+        P1 = self.hashOntoG1([I[0]])
         
         for i in range(2,len(I)+1):
-            temp = self.hashOntoG1("".join(I[:i]))
+            temp = self.hashOntoG1(I[:i])
             PVals.append(temp**r)
         # need a hash funct. here onto message space
         # TODO:do real XOR  
         hash_key = hashPair(self.group.pair_prod([P1], [PP["Q0"]])**r)
-        print("In Encrypt, hash key is: {}".format(hash_key))
         key_int_stream = [hash_key[i] ^ M[i] for i in range(len(hash_key))]
         C = bytes(key_int_stream)  
         return {"U": PVals, "C":C }
@@ -98,14 +92,9 @@ class HIDE_GS:
         key_elt = self.group.pair_prod([SK["S"]], [CT["U"][0]])
         # side channel for ID length
         if len(SK["QVals"]) != 0:
-            P2 = self.hashOntoG1("".join(ID2))
-            r = self.group.init(type=ZR, value=3)
-            if us[0] != P2**r:
-                print("ERROR -- U not right")
             denom = self.group.pair_prod(us, SK["QVals"])
             key_elt = key_elt / denom 
         shared_key = hashPair(key_elt)
-        print("In Decrypt, hash key is {}".format(shared_key))
         int_stream = [shared_key[i] ^ CT["C"][i] for i in range(len(shared_key))] 
         return bytes(int_stream)
 
@@ -116,13 +105,13 @@ if __name__ == "__main__":
     scheme = HIDE_GS()
 
     msk, pp = scheme.setup()
-    ID = ["edu"]
-    ID2 = ["edu", "becgabri"]
-    print("Extracting key for ID = EDU")
+    ID = ["edu", "jhu"]
+    ID2 = ["edu", "jhu", "cs", "becgabri"]
+    print("Extracting key for ID")
     sk_edu = scheme.keyGen(ID, msk, pp)
 
     msg1 = b"a" * 64
-    print("Encrypting to ID = EDU")
+    print("Encrypting to ID")
     ct1 = scheme.encrypt(msg1, ID, pp)
     print("Attempting decryption")
     pt1 = scheme.decrypt(ct1, sk_edu)
@@ -131,10 +120,10 @@ if __name__ == "__main__":
     else: 
         print("Decryption failed to give correct result. Result was {}".format(pt1)) 
  
-    print("Delegating key to edu becgabri...")
+    print("Delegating key to ID2...")
     sk_gab = scheme.delegate(pp, sk_edu, ID2)
     msg2 = b"b" * 64
-    print("Encrypting to ID = EDU BECGABRI")
+    print("Encrypting to ID2")
     ct2 = scheme.encrypt(msg2, ID2, pp)  
     print("Attempting decryption")
     pt2 = scheme.decrypt(ct2, sk_gab)
