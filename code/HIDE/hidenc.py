@@ -1,7 +1,9 @@
 
 from charm.toolbox.pairinggroup import PairingGroup, ZR, G1, G2, GT, H, hashPair
-
+import secrets
 from charm.core.math.integer import integer
+
+PT_LEN = 64
 
 class HIDE_GS:
     # the constructor
@@ -101,6 +103,10 @@ class HIDE_GS:
     def hashOntoG1(self, identifier):
         return self.group.hash(identifier, type=G1)
 
+    # one more helper function
+    def getRandomPT(self):
+        return secrets.token_bytes(PT_LEN) 
+
 if __name__ == "__main__":
     scheme = HIDE_GS()
 
@@ -110,7 +116,7 @@ if __name__ == "__main__":
     print("Extracting key for ID")
     sk_edu = scheme.keyGen(ID, msk, pp)
 
-    msg1 = b"a" * 64
+    msg1 = b"a" * PT_LEN
     print("Encrypting to ID")
     ct1 = scheme.encrypt(msg1, ID, pp)
     print("Attempting decryption")
@@ -122,7 +128,7 @@ if __name__ == "__main__":
  
     print("Delegating key to ID2...")
     sk_gab = scheme.delegate(pp, sk_edu, ID2)
-    msg2 = b"b" * 64
+    msg2 = b"b" * PT_LEN
     print("Encrypting to ID2")
     ct2 = scheme.encrypt(msg2, ID2, pp)  
     print("Attempting decryption")
@@ -131,4 +137,5 @@ if __name__ == "__main__":
         print("Decryption was correct!")
     else: 
         print("Decryption failed to give correct result. Result was {}".format(pt2))
+
  

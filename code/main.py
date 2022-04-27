@@ -1,20 +1,26 @@
  
-from HIBE.parallelize_hibenc_lew11 import HIBE_LW11 
+from HIDE.hidenc import HIDE_GS 
 import timelockpuzzle.puzzle as puzzle 
 import math
-from charm.toolbox.pairinggroup import GT, PairingGroup 
+from charm.toolbox.pairinggroup import PairingGroup 
 import sys
+import queue
 import threading
 from cryptography.hazmat.primitives import hashes
 from datetime import datetime
 import time
 import copy 
-import unittest
 
-TIME_SIZE_L = 8 # this is the length of the path in the tree
-N = 17 #controls the identity tree (makes it N-ary)
+# Testing related functionality
+# -- this should really be in another file 
+import unittest
+import logging
+
+TIME_SIZE_L = 5#8 # this is the length of the path in the tree
+N = 10#17 #controls the identity tree (makes it N-ary)
 MAX_TIME = N**TIME_SIZE_L - 1 # this is the maximum time supported
 MACHINE_SPEED = 5883206 # this is the poor man's way, just timed how long it took on my machine
+NUM_PROCS = 4
 
 # Require: id is a string
 # Effects: outputs a list of strings as long as ID -- this
@@ -79,7 +85,6 @@ def findPrefix(list_sk_t, t_prime):
             end = curr_idx
     
 def serializerHelper(group, pairing_elt, shared_dict, needed_idx):
-    #group, pairing_elt, shared_dict, needed_idx = args
     shared_dict[needed_idx] = group.serialize(pairing_elt, compression=False)
 
 def deserializerHelper(group, pairingBytes, shared_dict, needed_idx):
@@ -87,25 +92,21 @@ def deserializerHelper(group, pairingBytes, shared_dict, needed_idx):
 
 def pointCompressDecompress(compress_decompress, list_keys):
     list_threads = []
-    group = PairingGroup('SS512')
+    group = PairingGroup('BN254')
     for _, val in enumerate(list_keys):
         actual_keys = val[1]
         for key, vals in actual_keys.items():
-            if key == 'K':
-                for _, val2 in enumerate(vals):
-                    for i in range(len(val2)):
-                        t = threading.Thread(target=compress_decompress, args=(group, val2[i], val2, i,))
-                        list_threads.append(t)
-            elif key == 'g':
-                for _, val2 in enumerate(vals):
-                    for i in range(len(val2)):
-                        t = threading.Thread(target=compress_decompress, args=(group, val2[i], val2, i,))
-                        list_threads.append(t) 
+            if key == 'QVals':
+                for i in range(len(vals)):
+                    t = threading.Thread(target=compress_decompress, args=(group, vals[i], vals, i,))
+                    list_threads.append(t)
+            elif key == 'S':
+                t = threading.Thread(target=compress_decompress, args=(group, vals, actual_keys, 'S',))
+                list_threads.append(t)
     for thread in list_threads:
         thread.start()
     for thread in list_threads:
         thread.join()
-
 
 def serialize(list_keys):
     pointCompressDecompress(serializerHelper, list_keys)   
@@ -113,48 +114,20 @@ def serialize(list_keys):
     byte_str = b""
     for _, val in enumerate(list_keys):
         byte_str += val[0].encode() + b"-"
+        
         for key, mtx in val[1].items():
             byte_str += key.encode()
             byte_str += b"["
-            for _, val2 in enumerate(mtx):                    
-                byte_str += b"["+b"".join([val2[x] + b"," for x in range(len(val2))]) + b"]"
+            if key == "S":
+                byte_str += mtx
+            else: 
+                byte_str += b",".join(mtx)
             byte_str += b"]"
-            """
-            if key == "K":
-                byte_str += b"["
-                for _, val2 in enumerate(mtx):                    
-                    byte_str += b"["+b"".join([val2[x] + b"," for x in range(len(val2))]) + b"]"
-                byte_str += b"]"
-            elif key == 'g': 
-                byte_str += b"[" 
-                for _, val2 in enumerate(mtx):
-                    byte_str += b"["+b"".join([val2[x] + b"," for x in range(len(val2))]) + b"]"  
-                byte_str += b"]"
-            """
-        #byte_str += b"]"   
     return byte_str 
 
-# grabs next list of the form [elt1,elt2,elt3,elt4,]
-# expects the starting character [ to be present  
-# sets idx to be one character index beyond ] 
-def grabNextComponent(idx, search_string):
-    i = idx
-    if search_string[i] != ord("["):
-        raise ValueError("Outer component must start with [")
-    i = i + 1 # jump over start of outer array
-    component = []
-    while search_string[i] != ord("]"):
-        compr_pairing_elt = b""
-        while search_string[i] != ord(","):
-            compr_pairing_elt += bytes([search_string[i]])
-            i += 1
-        component.append(compr_pairing_elt)
-        i += 1 # jump over comma 
-    return i+1, component
-
-
-
 def deserialize(byte_string):
+    log = logging.getLogger("deserializer")
+    log.debug("Debugging deserialize, format of input is: {}".format(byte_string))
     list_keys = []
     # don't know the end condition yet
     idx = 0
@@ -165,52 +138,44 @@ def deserialize(byte_string):
             idx+=1
         dict_for_key = {}
         idx += 1 # jump over -
-        key_for_dict = chr(byte_string[idx])
-        if key_for_dict != 'K' and key_for_dict != 'g': 
-            raise ValueError("Encoding is incorrect")
-        idx += 1 
-        if byte_string[idx] != ord('['):
-            raise ValueError("Encoding is incorrect")
-        idx += 1 # jump over start of K indicated by [ 
-        dict_for_key[key_for_dict] = []
-        while True:
-            idx, component = grabNextComponent(idx, byte_string)
-
-            dict_for_key[key_for_dict].append(component)
-
-            if byte_string[idx] == ord(']'): ## this was a double break
-                break
+        for j in range(2):
+            comp = byte_string[idx:]
+            end_key = comp.find(b"[")
+            key_for_dict = comp[:end_key] 
+            if key_for_dict != b'S' and key_for_dict != b'QVals': 
+                raise ValueError("Encoding is incorrect")
+            idx += len(key_for_dict) 
+            if byte_string[idx] != ord('['):
+                raise ValueError("Encoding is incorrect")
+            idx += 1 # jump over start of key elt indicated by [ 
         
-        idx += 1 # -- jump over ']' that caused break 
-        next_key = chr(byte_string[idx])
-        if (next_key != 'K' and next_key != 'g') or next_key == key_for_dict:
-            raiseValueError("Encoding is incorrect")
-        idx += 1
-        if byte_string[idx] != ord('['):
-            raise ValueError("Incorrect decoding, missing dictionary element")
-        idx += 1 # jump over [
-        dict_for_key[next_key] = []
-        while True:
-            idx, component = grabNextComponent(idx, byte_string)
-            
-            dict_for_key[next_key].append(component)
-             
-            if byte_string[idx] == ord(']'): ## this was a double break
-                break
-            
-        list_keys.append(( byte_id.decode(), dict_for_key))
-        idx = idx + 1 # jump over the final ], should be start of another key identifier next
+            next_comp = byte_string[idx:]
+            end_comp = next_comp.find(b"]")
+            next_val = next_comp[:end_comp]
+            if key_for_dict == b"QVals":
+                #edge case
+                if len(next_val) == 0:
+                    next_val = []
+                else:
+                    next_val = next_val.split(b",")
+            dict_for_key[key_for_dict.decode()] = next_val
+            idx += end_comp + 1
+        
+        # add key 
+        list_keys.append((byte_id.decode(), dict_for_key))
+
     pointCompressDecompress(deserializerHelper, list_keys)
     return list_keys 
-        
-         
+       
+def parallel_extr(q, hibe, sk, pp, id_v): 
+    res = hibe.keyGen(encodeIdentity(id_v), sk, pp)
+    q.put((id_v, res))
 
 class TimeDeniableSig:
     # timeGap = number of seconds the time lock should last
     def KeyGen(self, timeGap, secParam):
         # this is the easiest one, just the 
-        self.group = PairingGroup('SS512')
-        self.hibe = HIBE_LW11(self.group)
+        self.hibe = HIDE_GS()
                 
         msk, pp = self.hibe.setup()
         return ((pp,timeGap), (pp,timeGap,msk))
@@ -268,7 +233,7 @@ class TimeDeniableSig:
         t_in_base_n = repr_base(t, N, TIME_SIZE_L) 
         #print("FSKeygen for {}".format(t_in_base_n))
         curr_id = ''
-
+        key_id_list = []
         for i in range(TIME_SIZE_L):
             string_left_mask = (N**(TIME_SIZE_L-i)) - 1
             if reconstruct_num(t_in_base_n[i:],N) == string_left_mask:
@@ -276,8 +241,10 @@ class TimeDeniableSig:
             elif t_in_base_n[i] != '0':
                 for node in range(int(t_in_base_n[i])):
                     #print("Adding key for {}".format(curr_id+str(node)))
-                    add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
-                    list_keys.append((curr_id+str(node), add_key))
+                    key_id_list.append(curr_id+str(node))
+                    #add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
+                    #list_keys.append((curr_id+str(node), add_key))
+
             # you should add here the path you're going down next 
             curr_id += t_in_base_n[i]
 
@@ -285,14 +252,29 @@ class TimeDeniableSig:
         if curr_id == "":
             for node in range(int(t_in_base_n[i])+1):
                 #print("Adding key for {}".format(curr_id+str(node)))
-                add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
-                list_keys.append((curr_id+str(node), add_key))
+                key_id_list.append(curr_id+str(node))
+                #add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
+                #list_keys.append((curr_id+str(node), add_key))
         else:
             if curr_id[-1] != str(N-1):
                 #print("Adding key for {}".format(curr_id))
-                add_key = self.hibe.keyGen(encodeIdentity(curr_id), sk, pk)
-                list_keys.append((curr_id, add_key)) 
-
+                key_id_list.append(curr_id)
+                #add_key = self.hibe.keyGen(encodeIdentity(curr_id), sk, pk)
+                #list_keys.append((curr_id, add_key)) 
+        
+        #fill out all the keys using a thread pool 
+        q = queue.Queue(len(key_id_list))
+        thread_l = []
+        for key_id in key_id_list:
+            thread_l.append(threading.Thread(target=parallel_extr, args=(q, self.hibe, sk, pk, key_id))) 
+        for thread in thread_l: 
+            thread.start()
+        for thread in thread_l:
+            thread.join()
+        
+        for i in range(len(key_id_list)):
+            a_key = q.get()
+            list_keys.append(a_key) 
         return list_keys
 
     def FSSign(self, sk, t, m):
@@ -329,8 +311,10 @@ class TimeDeniableSig:
         # note here, doing this clobbers the OG thing
         # after this it's not the same  
         pt = serialize(list_keys)
-
+        puzzle_ticker = time.time() 
         _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
+        end_time = time.time() - puzzle_ticker
+        print("Time encrypting the signing key: {}".format(end_time))
         return ((n,a,bar_t,enc_key, enc_msg), s)
 
     def AltSign(self, vk, m_0, t_0, sigma_0, m, t):
@@ -368,28 +352,28 @@ class TimeDeniableSig:
                 
 
         # encrypt/decrypt check
-        test_elt = self.group.random(GT)
-        ct = self.hibe.encrypt(test_elt, identity, pk)
+        test_msg = self.hibe.getRandomPT()
+        ct = self.hibe.encrypt(test_msg, identity, pk)
 
-        if self.hibe.decrypt(ct, sk_id) == test_elt:
+        if self.hibe.decrypt(ct, sk_id) == test_msg:
             return True
         return False
 
 def keyEqual(dict1, dict2):
     for key, outer_list in dict1.items():
-        if not key in dict2 or len(dict1[key]) != len(dict2[key]):
-            print("Is key {} in dict2? {}. Length in dict1: {}. Length in dict2: {}".format(key, key in dict2, len(dict1[key]), len(dict2[key])))
-            return False
-        for idx, vals in enumerate(outer_list):
-            # one more nested list here 
-            if len(vals) != len(dict2[key][idx]):
-                print("Length of dict1[{}][{}] is {} while dict2 length is {}".format(key, idx, len(vals), len(dict2[key][idx])))
+        if not key in dict2:
+            print("Missing key {} in dict1 from dict2".format(key))
+        if isinstance(outer_list, list): 
+            if len(dict1[key]) != len(dict2[key]):
+                print("Length of key {} in dict1: {}. Length in dict2: {}".format(key, len(dict1[key]), len(dict2[key])))
                 return False
-            # one more layer 
-            for id2, val2 in enumerate(vals):
-                if val2 != dict2[key][idx][id2]:
-                    print("dict1[{}][{}][{}] value is {} while dict2 value is {}".format(key, idx, id2,val2, dict2[key][idx][id2]))
+            for idx, val in enumerate(outer_list):
+                if val != dict2[key][idx]:
+                    print("dict1[{}][{}] value is {} while dict2 value is {}".format(key, idx, val, dict2[key][idx]))
                     return False
+        else:
+            if outer_list != dict2[key]:
+                print("Key:{}. Value in dict1:{}. Value in dict2:{}".format(key, outer_list, dict2[key]))
     return True
 
 def listKeysEqual(list1, list2):
@@ -426,7 +410,6 @@ class TestUtils(unittest.TestCase):
     def test_repr_2(self):
         seven = repr_base(7,3,3)
         self.assertEqual(reconstruct_num(seven, 3),7)
-
 
 class TestTreeThreeSig(unittest.TestCase):
     def setUp(self):
@@ -537,7 +520,7 @@ class TestDeniableSigs(unittest.TestCase):
         self.assertEqual(findPrefix(six_key,4),1)
         self.assertEqual(findPrefix(six_key, 3),0)
         self.assertEqual(findPrefix(six_key, 2),0)
-
+    
 class TestDenSigLargerTree(unittest.TestCase):
 
     def setUp(self):
@@ -575,6 +558,12 @@ class TestDenSigLargerTree(unittest.TestCase):
             self.assertEqual(deepEqual(self.ts.FSKeygen((pk,sk_prime), val), fsKeygen[i]), True), "Incorrect key extracted for FSKeygen with time size 4, value {}".format(val)
 
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "test":
+        print("Running tests...")
+        logging.basicConfig(stream=sys.stderr)
+        logging.getLogger("deserializer").setLevel(logging.DEBUG)
+        unittest.main(argv=['first-arg-is-ignored'], exit=False)
+        sys.exit(0) 
     #unittest.main()   
     ts = TimeDeniableSig()
     secperMin = 60
@@ -583,9 +572,9 @@ if __name__ == "__main__":
     # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know but it could be that this corresponds to 80 bits of security (1024 bit DH)
     vk, sk = ts.KeyGen(fakeTimeParam, 256)
     m1 = "Cryptography rearranges power: it configures who can do what, from what."
-    t1 = 1634098632
-    curr_date = datetime.fromtimestamp(t1)
-    print("Date and time used with: {}".format(curr_date))
+    t1 = 16340
+    #curr_date = datetime.fromtimestamp(t1)
+    #print("Date and time used with: {}".format(curr_date))
     avg_time = 0
     for i in range(100):
         beg_ticker = time.time()
