@@ -1,15 +1,17 @@
- 
+import random 
 from HIDE.hidenc import HIDE_GS 
-import timelockpuzzle.puzzle as puzzle 
+from timelockpuzzle.puzzle import TLP 
 import math
 from charm.toolbox.pairinggroup import PairingGroup 
 import sys
 import queue
+from multiprocessing import Process, Queue
 import threading
 from cryptography.hazmat.primitives import hashes
 from datetime import datetime
 import time
 import copy 
+import csv
 
 # Testing related functionality
 # -- this should really be in another file 
@@ -19,8 +21,12 @@ import logging
 TIME_SIZE_L = 5#8 # this is the length of the path in the tree
 N = 10#17 #controls the identity tree (makes it N-ary)
 MAX_TIME = N**TIME_SIZE_L - 1 # this is the maximum time supported
-MACHINE_SPEED = 5883206 # this is the poor man's way, just timed how long it took on my machine
-NUM_PROCS = 4
+MACHINE_SPEED = 5883206
+SECPERMIN = 60
+FAKETIMEPARAM = 7*24*60*SECPERMIN
+#FAKETIMEPARAM = 2
+
+FILENAME = "tds_vary_n_ary.csv"
 
 # Require: id is a string
 # Effects: outputs a list of strings as long as ID -- this
@@ -91,26 +97,21 @@ def deserializerHelper(group, pairingBytes, shared_dict, needed_idx):
     shared_dict[needed_idx] = group.deserialize(pairingBytes, compression=False)
 
 def pointCompressDecompress(compress_decompress, list_keys):
-    list_threads = []
+    list_procs = []
     group = PairingGroup('BN254')
     for _, val in enumerate(list_keys):
         actual_keys = val[1]
         for key, vals in actual_keys.items():
             if key == 'QVals':
                 for i in range(len(vals)):
-                    t = threading.Thread(target=compress_decompress, args=(group, vals[i], vals, i,))
-                    list_threads.append(t)
+                    compress_decompress(group, vals[i], vals, i)
             elif key == 'S':
-                t = threading.Thread(target=compress_decompress, args=(group, vals, actual_keys, 'S',))
-                list_threads.append(t)
-    for thread in list_threads:
-        thread.start()
-    for thread in list_threads:
-        thread.join()
+                compress_decompress(group, vals, actual_keys, 'S')
 
 def serialize(list_keys):
+    #print("In beginning of serialize with list {}".format(list_keys))
     pointCompressDecompress(serializerHelper, list_keys)   
-
+    #print("Now have list: {}".format(list_keys))
     byte_str = b""
     for _, val in enumerate(list_keys):
         byte_str += val[0].encode() + b"-"
@@ -165,18 +166,31 @@ def deserialize(byte_string):
         list_keys.append((byte_id.decode(), dict_for_key))
 
     pointCompressDecompress(deserializerHelper, list_keys)
+    log.debug("Got list of keys, returning...")
     return list_keys 
        
-def parallel_extr(q, hibe, sk, pp, id_v): 
-    res = hibe.keyGen(encodeIdentity(id_v), sk, pp)
-    q.put((id_v, res))
+# the things we do because python and multithreading and pickling and GILs UGH :P 
+def parallel_extr(q, sk, pp, id_v): 
+    tmp_kg = HIDE_GS()
+    res = tmp_kg.keyGen(encodeIdentity(id_v), sk, pp)
+    """
+    a_key = None
+    try:
+        a_key = serialize([(str(id_v), res)])
+    except:
+        print("Starting parallel_extr with: sk = {}, pp = {}, id_v = {}".format(sk, pp, id_v))
+        print("experienced error in serialize")
+        print("res key was: {}".format(res))
+    """
+    q.put((str(id_v), res))
 
 class TimeDeniableSig:
     # timeGap = number of seconds the time lock should last
     def KeyGen(self, timeGap, secParam):
         # this is the easiest one, just the 
         self.hibe = HIDE_GS()
-                
+        self.tlp = TLP(timeGap, MACHINE_SPEED)
+
         msk, pp = self.hibe.setup()
         return ((pp,timeGap), (pp,timeGap,msk))
 
@@ -242,8 +256,8 @@ class TimeDeniableSig:
                 for node in range(int(t_in_base_n[i])):
                     #print("Adding key for {}".format(curr_id+str(node)))
                     key_id_list.append(curr_id+str(node))
-                    #add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
-                    #list_keys.append((curr_id+str(node), add_key))
+                    add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
+                    list_keys.append((curr_id+str(node), add_key))
 
             # you should add here the path you're going down next 
             curr_id += t_in_base_n[i]
@@ -253,28 +267,43 @@ class TimeDeniableSig:
             for node in range(int(t_in_base_n[i])+1):
                 #print("Adding key for {}".format(curr_id+str(node)))
                 key_id_list.append(curr_id+str(node))
-                #add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
-                #list_keys.append((curr_id+str(node), add_key))
+                add_key = self.hibe.keyGen(encodeIdentity(curr_id+str(node)), sk, pk)
+                list_keys.append((curr_id+str(node), add_key))
         else:
             if curr_id[-1] != str(N-1):
                 #print("Adding key for {}".format(curr_id))
                 key_id_list.append(curr_id)
-                #add_key = self.hibe.keyGen(encodeIdentity(curr_id), sk, pk)
-                #list_keys.append((curr_id, add_key)) 
-        
+                add_key = self.hibe.keyGen(encodeIdentity(curr_id), sk, pk)
+                list_keys.append((curr_id, add_key)) 
+        """ 
         #fill out all the keys using a thread pool 
-        q = queue.Queue(len(key_id_list))
+        q = Queue()
         thread_l = []
+        log = logging.getLogger("deserializer")
         for key_id in key_id_list:
-            thread_l.append(threading.Thread(target=parallel_extr, args=(q, self.hibe, sk, pk, key_id))) 
+            log.debug("Creating process for key {}".format(key_id)) 
+            thread_l.append(Process(target=parallel_extr, args=(q, sk, pk, key_id,))) 
+            #parallel_extr(q, sk, pk, key_id)
+        log.debug("The length of key_id_list is {} there are {} proc tasks".format(len(key_id_list),len(thread_l)))
         for thread in thread_l: 
             thread.start()
         for thread in thread_l:
+            log.debug("Joining...")
             thread.join()
-        
+        log.debug("Got through all proc joins")
+
+        #list_keys = [None] * len(key_id_list)       
+        list_keys = []
         for i in range(len(key_id_list)):
-            a_key = q.get()
-            list_keys.append(a_key) 
+            log.debug("grabbing key") 
+            byte_key = q.get()
+            #a_key = deserialize(byte_key)
+            log.debug("got key")
+            #id_place = key_id_list.index(a_key[0][0])
+            #list_keys[id_place] = a_key[0]
+            list_keys.append(byte_key)
+        log.debug("Grabbed all keys")
+        """
         return list_keys
 
     def FSSign(self, sk, t, m):
@@ -311,11 +340,11 @@ class TimeDeniableSig:
         # note here, doing this clobbers the OG thing
         # after this it's not the same  
         pt = serialize(list_keys)
-        puzzle_ticker = time.time() 
-        _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
-        end_time = time.time() - puzzle_ticker
-        print("Time encrypting the signing key: {}".format(end_time))
-        return ((n,a,bar_t,enc_key, enc_msg), s)
+        #puzzle_ticker = time.time() 
+        t, n, a, enc_msg, enc_key = self.tlp.encrypt(pt)
+        #end_time = time.time() - puzzle_ticker
+        #print("Time encrypting the signing key: {}".format(end_time))
+        return ((n,a,t,enc_msg, enc_key), s)
 
     def AltSign(self, vk, m_0, t_0, sigma_0, m, t):
         if t > t_0: 
@@ -323,16 +352,16 @@ class TimeDeniableSig:
         pk, timeGap = vk
 
         c, _ = sigma_0 
-        n, a, bar_t, enc_key, enc_msg = c 
-        keys_as_bytes = puzzle.decrypt(n, a, bar_t, enc_key, enc_msg)
+        n, a, bar_t, enc_msg, enc_key = c
+        keys_as_bytes = self.tlp.decrypt(bar_t, n, a, enc_msg, enc_key)
         list_keys = deserialize(keys_as_bytes)
         # need to shrink w/ FS DELEG
         new_list_keys = self.FSDelegate(pk, t_0, (pk, list_keys), t)
         s = self.FSSign((pk, new_list_keys), t, m)
         
         pt = serialize(new_list_keys)
-        _, _, n, a, bar_t, enc_key, enc_msg, _ = puzzle.encrypt(pt, timeGap, MACHINE_SPEED)
-        return ((n,a,bar_t,enc_key,enc_msg), s)
+        t, n, a, enc_msg, enc_key = self.tlp.encrypt(pt)
+        return ((n,a,t,enc_msg,enc_key), s)
 
     #it's assumed m is a string, t is a numerical value
     def Verify(self, vk, sigma, m, t):
@@ -444,7 +473,7 @@ class TestTreeThreeSig(unittest.TestCase):
 
         self.assertEqual(deepEqual(two_key, ['0']),True)
         self.assertEqual(deepEqual(fourth_key, ['0','10','11']),True)
-
+    
     def test_sign_altsign(self):
         m = '12121'
         t = 6
@@ -455,8 +484,7 @@ class TestTreeThreeSig(unittest.TestCase):
         new_t = 1
         new_sigma = self.ts.AltSign(self.vk, m, t, sigma,new_m, new_t) 
         self.assertEqual(self.ts.Verify(self.vk, new_sigma, new_m, new_t), True)
-
-
+    
 class TestDeniableSigs(unittest.TestCase):
     def setUp(self):
         global TIME_SIZE_L, N
@@ -557,6 +585,70 @@ class TestDenSigLargerTree(unittest.TestCase):
         for i, val in enumerate([4]):
             self.assertEqual(deepEqual(self.ts.FSKeygen((pk,sk_prime), val), fsKeygen[i]), True), "Incorrect key extracted for FSKeygen with time size 4, value {}".format(val)
 
+def calculateSigSize(sig, group_repr):
+    sum_b = 0
+    for i in range(len(sig[0])):
+        if isinstance(sig[0][i], bytes) or isinstance(sig[0][i], str):
+            sum_b += len(sig[0][i])
+        else:
+            sum_b += (sig[0][i].bit_length() + 7) // 8
+    sum_a = 0
+    # check S value next
+    sum_a += len(group_repr.serialize(sig[1]['S']))
+    for i in range(len(sig[1]['QVals'])):
+        sum_a += len(group_repr.serialize(sig[1]['QVals'][i]))
+    return (sum_a, sum_b)
+
+def microbenchmarks():
+    global N, TIME_SIZE_L
+    pr_group = PairingGroup('BN254')
+    with open(FILENAME, "w", newline="") as fileObj:
+        writer = csv.writer(fileObj)
+        writer.writerow(["n ary", "median sign time", "avg sign time", "median verify time", "avg verify time", "median sig. + key material size", "avg sig + key material size"])
+
+    NUM_ATTEMPTS = 500
+    N_ary = [2, 5, 7, 10, 12, 14, 16, 19]
+    for n in N_ary:
+        # depth to achieve 2^16 values
+        depth = int(math.ceil(16 / math.log(n, 2)))
+        N = n
+        TIME_SIZE_L = depth
+        ts = TimeDeniableSig()
+        vk, sk = ts.KeyGen(FAKETIMEPARAM, 256)
+        tmp_res_ss = []
+        tmp_res_st = []
+        tmp_res_verif = []
+        m1 = "HI I DON'T EFFECT MUCH NICE TO MEET YOU"
+        for i in range(NUM_ATTEMPTS): 
+            if i % 100 == 0:
+                print("This is {}-ary try {}".format(n,i))
+            rt = random.randrange(0,N**TIME_SIZE_L-1)
+            beg_ticker = time.time()
+            sig = ts.Sign(sk, m1, rt)
+            duration = time.time() - beg_ticker
+            tmp_res_st.append(duration)
+            sig_size_tuple = calculateSigSize(sig, pr_group)
+            tmp_res_ss.append(sig_size_tuple[0]+sig_size_tuple[1])
+            beg_ticker = time.time()
+            ts.Verify(vk, sig, m1, rt)
+            duration = time.time() - beg_ticker
+            tmp_res_verif.append(duration)
+
+        mid = len(tmp_res_ss) // 2
+        avg_t = sum(tmp_res_st) / len(tmp_res_st)
+        avg_s = sum(tmp_res_ss) / len(tmp_res_ss)
+        avg_v = sum(tmp_res_verif) / len(tmp_res_verif)
+        tmp_res_st.sort()
+        tmp_res_ss.sort()
+        tmp_res_verif.sort()
+        row = [n,tmp_res_st[mid], avg_t, tmp_res_verif[mid], avg_v, tmp_res_ss[mid], avg_s] 
+ 
+        with open(FILENAME, "a", newline="") as fileObj:
+            writer = csv.writer(fileObj)
+            writer.writerow(row)
+        print("Finished round with {}-ary tree!".format(n))      
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "test":
         print("Running tests...")
@@ -564,24 +656,32 @@ if __name__ == "__main__":
         logging.getLogger("deserializer").setLevel(logging.DEBUG)
         unittest.main(argv=['first-arg-is-ignored'], exit=False)
         sys.exit(0) 
-    #unittest.main()   
+
+    microbenchmarks()
+    """ 
     ts = TimeDeniableSig()
-    secperMin = 60
-    fakeTimeParam = 7*24*60*secperMin
     # I don't know what the security of the pairing scheme actually corresponds to :( 
     # according to charm, order of base field for EC used in HIBE is 512, SS = Super Singular curve -- don't know but it could be that this corresponds to 80 bits of security (1024 bit DH)
-    vk, sk = ts.KeyGen(fakeTimeParam, 256)
+    vk, sk = ts.KeyGen(FAKETIMEPARAM, 256)
     m1 = "Cryptography rearranges power: it configures who can do what, from what."
     t1 = 16340
-    #curr_date = datetime.fromtimestamp(t1)
-    #print("Date and time used with: {}".format(curr_date))
+    median_list = [] 
     avg_time = 0
+    sig = ts.Sign(sk, m1, t1)
+    pr_group = PairingGroup('BN254')
+    size_of_sig, size_of_enckey = calculateSigSize(sig,pr_group) 
+    print("The size of the signature for this message is {} bytes and the size of the encrypted key material is {}".format(size_of_sig, size_of_enckey))
     for i in range(100):
+        t1 = random.randrange(0,N**TIME_SIZE_L-1)
+        sig = ts.Sign(sk, m1,t1)
         beg_ticker = time.time()
-        ts.Sign(sk, m1,t1)
+        ts.Verify(vk, sig, m1, t1)
         duration = time.time() - beg_ticker
         print(duration)
+        median_list.append(duration)
         avg_time += duration
     avg_time = avg_time / 100
-    print("Average time for tlp parameter {} seconds was {} seconds".format(fakeTimeParam,avg_time))
-    
+    median_list.sort()
+    mid = len(median_list) // 2
+    print("Average time for tlp parameter {} seconds was {} seconds with median time {}".format(FAKETIMEPARAM,avg_time, median_list[mid]))
+    """    
