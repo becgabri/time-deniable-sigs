@@ -111,8 +111,8 @@ if __name__ == "__main__":
     scheme = HIDE_GS()
 
     msk, pp = scheme.setup()
-    ID = ["edu", "jhu"]
-    ID2 = ["edu", "jhu", "cs", "becgabri"]
+    ID = ["edu", "uni"]
+    ID2 = ["edu", "uni", "cs", "johnsmith"]
     print("Extracting key for ID")
     sk_edu = scheme.keyGen(ID, msk, pp)
 
@@ -127,12 +127,12 @@ if __name__ == "__main__":
         print("Decryption failed to give correct result. Result was {}".format(pt1)) 
  
     print("Delegating key to ID2...")
-    sk_gab = scheme.delegate(pp, sk_edu, ID2)
+    sk_uni = scheme.delegate(pp, sk_edu, ID2)
     msg2 = b"b" * PT_LEN
     print("Encrypting to ID2")
     ct2 = scheme.encrypt(msg2, ID2, pp)  
     print("Attempting decryption")
-    pt2 = scheme.decrypt(ct2, sk_gab)
+    pt2 = scheme.decrypt(ct2, sk_uni)
     if pt2 == msg2:
         print("Decryption was correct!")
     else: 
